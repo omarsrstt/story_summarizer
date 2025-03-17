@@ -172,3 +172,4 @@ cython_debug/
 
 # Additional ignored files
 src/config.json
+novels/
