@@ -269,7 +269,7 @@ def navigate_to_latest_chapter(novel_url, driver):
         # Click the first chapter in the "Latest Chapters" section
         first_chapter = latest_chapters.find_element(By.TAG_NAME, "a")
         first_chapter.click()
-        time.sleep(4)  # Wait for the chapter page to load
+        time.sleep(2.5)  # Wait for the chapter page to load
 
         print("Navigated to a random chapter from the homepage.")
 
@@ -312,7 +312,7 @@ def navigate_to_chapter(driver, chapter_number):
 
         # Click the chapter option to navigate to the chapter
         chapter_option.click()
-        time.sleep(4)  # Wait for the chapter page to load
+        time.sleep(2.5)  # Wait for the chapter page to load
 
         print(f"Navigated to Chapter {chapter_number}")
         return True
@@ -372,7 +372,7 @@ def scrape_chapter(driver, website, novel_name, chapter_num, save_dir):
         print(f"Failed to scrape {novel_name} - Chapter {chapter_num}: {e}")
         return None
 
-def save_chapter_to_file(novel_name, chapter_num, title, content, save_dir):
+def save_chapter_to_file(novel_name, chapter_num, title, content, save_dir = "novels"):
     """
     Save the chapter content to a file.
 
@@ -402,6 +402,50 @@ def save_chapter_to_file(novel_name, chapter_num, title, content, save_dir):
 
     except Exception as e:
         print(f"Failed to save chapter {chapter_num}: {e}")
+
+def scrape_all_chapters(driver, website, novel_metadata, save_dir = "novels"):
+    """
+    Scrape all chapters of a novel and save them to files.
+
+    Args:
+        driver: Selenium WebDriver instance.
+        website (dict): Website configuration containing CSS selectors.
+        novel_metadata (dict): Metadata of the novel, including 'title' and 'total_chapters'.
+        save_dir (str): Directory to save the chapters.
+    """
+    for chapter_num in range(1, novel_metadata['total_chapters'] + 1):
+        try:
+            # Navigate to the chapter
+            if navigate_to_chapter(driver, chapter_num):
+                # Scrape and save the chapter
+                scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir)
+                print(f"Successfully scraped Chapter {chapter_num}")
+            else:
+                print(f"Failed to navigate to Chapter {chapter_num}")
+        except Exception as e:
+            print(f"Error scraping Chapter {chapter_num}: {e}")
+
+def scrape_chapters_range(driver, website, novel_metadata, start_range, stop_range, save_dir = "novels"):
+    """
+    Scrape all chapters of a novel and save them to files.
+
+    Args:
+        driver: Selenium WebDriver instance.
+        website (dict): Website configuration containing CSS selectors.
+        novel_metadata (dict): Metadata of the novel, including 'title' and 'total_chapters'.
+        save_dir (str): Directory to save the chapters.
+    """
+    for chapter_num in range(start_range, stop_range + 1):
+        try:
+            # Navigate to the chapter
+            if navigate_to_chapter(driver, chapter_num):
+                # Scrape and save the chapter
+                scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir)
+                print(f"Successfully scraped Chapter {chapter_num}")
+            else:
+                print(f"Failed to navigate to Chapter {chapter_num}")
+        except Exception as e:
+            print(f"Error scraping Chapter {chapter_num}: {e}")
 
 
 def setup_driver():
@@ -519,20 +563,33 @@ def main():
         else:
             print("Failed to fetch novel metadata.")
         
-        # Step 4: Navigate to a specific chapter
+        # Step 4: Navigate to the last chapter
         navigate_to_latest_chapter(selected_novel['url'], driver)
-        chapter_num = 1
-        if navigate_to_chapter(driver, 1):
-            # Step 5: Scrape and save the chapter
-            chapter_data = scrape_chapter(driver, 
-                                                args.website, 
-                                                novel_metadata['title'], 
-                                                chapter_num, 
-                                                save_dir = "../novels")
+        
+        # Step 5: Find, scrape and save the chapter
+        # chapter_num = 1
+        # if navigate_to_chapter(driver, 1):
+        #     chapter_data = scrape_chapter(driver, 
+        #                                         args.website, 
+        #                                         novel_metadata['title'], 
+        #                                         chapter_num, 
+        #                                         save_dir = "novels")
+
+        # scrape_all_chapters(driver, 
+        #                     args.website, 
+        #                     novel_metadata, 
+        #                     save_dir = "novels")
+
+        scrape_chapters_range(driver, 
+                                args.website, 
+                                novel_metadata, 
+                                100, 
+                                236, 
+                                save_dir = "novels")
 
         # Display results
-        print(chapter_data["title"])
-        print(chapter_data["content"])
+        # print(chapter_data["title"])
+        # print(chapter_data["content"])
 
     except Exception as e:
         print(f"Exception: {str(e)}")
