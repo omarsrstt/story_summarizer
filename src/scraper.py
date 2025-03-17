@@ -32,7 +32,7 @@ def search_novels(query, website, driver):
         driver.get(website["search_url"])
         print(f"Loaded search page: {website['search_url']}")
         focus_window(driver)
-        time.sleep(7)
+        time.sleep(6.5)
         
         # Find the search input field
         print("Waiting for search input field...")
@@ -49,7 +49,7 @@ def search_novels(query, website, driver):
         
         # Wait for the search results to load
         print("Waiting for search results...")
-        time.sleep(2.5)  # Wait for the search bar
+        time.sleep(2)  # Wait for the search bar
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, website["search_item_selector"]))
         )
@@ -58,7 +58,7 @@ def search_novels(query, website, driver):
         # Scroll to the bottom of the page to load all results (if needed)
         print("Scrolling to load more results...")
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)  # Wait for additional content to load
+        time.sleep(0.5)  # Wait for additional content to load
         
         # Parse the page source
         print("Parsing page source...")
@@ -163,6 +163,89 @@ def select_novel(novel_name, website, driver):
         print(f"Failed to select novel: {e}")
         return None
 
+def get_novel_metadata(website, novel_url, driver):
+    """
+    Extract metadata for a novel from its dedicated page using Selenium.
+
+    Args:
+        website (dict): Website configuration containing CSS selectors.
+        novel_url (str): URL of the novel's page.
+        driver: Selenium WebDriver instance.
+
+    Returns:
+        dict: Novel metadata including title, author, description, chapters, etc.
+    """
+    try:
+        # Navigate to the novel's page
+        if driver.current_url != novel_url:
+            print(f"Navigating to novel page: {novel_url}")
+            driver.get(novel_url)
+            time.sleep(7)  # Wait for the page to load
+
+        # Parse the page source
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # Extract novel title
+        title = soup.select_one(website["title_selector"]).text.strip() if soup.select_one(website["title_selector"]) else "Unknown Title"
+
+        # Extract novel author
+        author_element = soup.select_one(website["author_selector"])
+        author = author_element.get(website["author_selector_exact"], author_element.text.strip()) if author_element else "Unknown Author"
+        
+         # Extract novel description
+        description = soup.select_one(website["description_selector"]).text.strip() if soup.select_one(website["description_selector"]) else "No description available."
+
+        # Extract total number of chapters
+        # Wait for the dropdown box to load
+        dropdown = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, website["chapter_dropdown"]))
+        )
+        # Extract all options from the dropdown
+        options = dropdown.find_elements(By.TAG_NAME, website["chapter_dropdown_options"])
+
+        total_chapters = 0
+
+        # Iterate through each option and calculate the number of chapters
+        for option in options:
+            text = option.text  # e.g., "C.1 - C.40"
+            if " - " in text:
+                start, end = text.split(" - ")
+                start_num = int(start.lstrip("C."))
+                end_num = int(end.lstrip("C."))
+                chapters_in_range = (end_num - start_num) + 1  # Calculate chapters in this range
+                total_chapters += chapters_in_range  # Add to the total
+
+        print(f"Total number of chapters: {total_chapters}")
+
+        # Extract additional metadata (e.g., genres, status)
+        genres = []
+        genre_elements = soup.select(website["genre_selector"])  # Locate all genre links
+        if genre_elements:
+            genres = [genre.text.strip() for genre in genre_elements]  # Extract the text content of each <a> tag
+        else:
+            print("No genres found.")
+
+        status = "Unknown"
+        status_element = soup.select_one(website["status_selector"])
+        if status_element:
+            status = status_element.text.strip()
+
+        # Return the metadata
+        return {
+            "title": title,
+            "author": author,
+            "description": description,
+            "total_chapters": total_chapters,
+            "genres": genres,
+            "status": status,
+            "url": novel_url,
+            "website": website["name"]
+        }
+
+    except Exception as e:
+        print(f"Failed to fetch metadata for {novel_url}: {e}")
+        return None
+
 def setup_driver():
     options = uc.ChromeOptions()
     driver = uc.Chrome(options=options)
@@ -265,6 +348,18 @@ def main():
         if not selected_novel:
             return
         print(f"\nSelected: {selected_novel['novel']['title']}")
+
+        # Step 3: Get novel metadata
+        novel_metadata = get_novel_metadata(args.website, selected_novel['url'], driver=driver)
+        if novel_metadata:
+            print("\nNovel Metadata:")
+            print(f"Title: {novel_metadata['title']}")
+            print(f"Author: {novel_metadata['author']}")
+            print(f"Description: {novel_metadata['description']}")
+            print(f"Total Chapters: {novel_metadata['total_chapters']}")
+            print(f"URL: {novel_metadata['url']}")
+        else:
+            print("Failed to fetch novel metadata.")
 
     except Exception as e:
         print(f"Exception: {str(e)}")
