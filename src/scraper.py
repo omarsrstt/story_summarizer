@@ -17,6 +17,8 @@ from tabulate import tabulate
 import os
 import time
 import json
+import random
+import re
 
 
 def focus_window(driver):
@@ -246,6 +248,79 @@ def get_novel_metadata(website, novel_url, driver):
         print(f"Failed to fetch metadata for {novel_url}: {e}")
         return None
 
+
+def navigate_to_latest_chapter(novel_url, driver):
+    """
+    Navigate to the last chapter from the novel homepage.
+
+    Args:
+        novel_url (str): URL of the novel's homepage.
+        driver: Selenium WebDriver instance.
+    """
+    try:
+        # Navigate to the novel homepage
+        if driver.current_url != novel_url:
+            print(f"Navigating to novel page: {novel_url}")
+            driver.get(novel_url)
+            time.sleep(7)  # Wait for the page to load
+
+        # Locate the "Latest Chapters" section
+        latest_chapters = driver.find_element(By.CLASS_NAME, "ul-list5")
+
+        # Click the first chapter in the "Latest Chapters" section
+        first_chapter = latest_chapters.find_element(By.TAG_NAME, "a")
+        first_chapter.click()
+        time.sleep(4)  # Wait for the chapter page to load
+
+        print("Navigated to a random chapter from the homepage.")
+
+    except Exception as e:
+        print(f"Failed to navigate to a random chapter: {e}")
+    
+def navigate_to_chapter(driver, chapter_number):
+    """
+    Navigate to a specific chapter using the dropdown on the chapter page.
+
+    Args:
+        driver: Selenium WebDriver instance.
+        chapter_number (int): The chapter number to navigate to.
+    """
+    try:
+        print(f"Navigating to Chapter {chapter_number}")
+        # Wait for the dropdown icon to be clickable
+        dropdown_icon = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.CLASS_NAME, "glyphicon-list-alt"))
+        )
+        
+        # Click the dropdown icon to expand the list of chapters
+        dropdown_icon.click()
+        time.sleep(0.5)  # Wait for the dropdown to fully expand
+
+        # Locate the dropdown list of chapters
+        chapter_list = driver.find_element(By.CLASS_NAME, "select-chapter")
+
+        # Find the desired chapter option
+        # chapter_option = chapter_list.find_element(
+        #     By.XPATH, f"//option[contains(text(), 'Chapter {chapter_number}:') or contains(text(), 'Chapter {chapter_number} ')]"
+        # )
+        chapter_option = chapter_list.find_element(
+            By.XPATH, f"//option[contains(text(), 'Chapter {chapter_number}')]"
+        )
+
+        # Scroll the dropdown to make the chapter option visible
+        driver.execute_script("arguments[0].scrollIntoView();", chapter_option)
+        time.sleep(0.5)  # Wait for scrolling to complete
+
+        # Click the chapter option to navigate to the chapter
+        chapter_option.click()
+        time.sleep(4)  # Wait for the chapter page to load
+
+        print(f"Navigated to Chapter {chapter_number}")
+
+    except Exception as e:
+        print(f"Failed to navigate to Chapter {chapter_number}: {e}")
+
+
 def setup_driver():
     options = uc.ChromeOptions()
     driver = uc.Chrome(options=options)
@@ -360,6 +435,14 @@ def main():
             print(f"URL: {novel_metadata['url']}")
         else:
             print("Failed to fetch novel metadata.")
+        
+        # Step 4: Navigate to a specific chapter
+        navigate_to_latest_chapter(selected_novel['url'], driver)
+        navigate_to_chapter(driver, 100)
+
+        # for _ in range(100):
+        #     chapter_num = random.randint(1, 500)
+        #     navigate_to_chapter(driver, chapter_num)
 
     except Exception as e:
         print(f"Exception: {str(e)}")
