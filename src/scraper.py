@@ -1,25 +1,14 @@
-import cloudscraper
 import argparse
-import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium_stealth import stealth
 import undetected_chromedriver as uc
-from pprint import pprint
 from tabulate import tabulate
 import os
 import time
 import json
-import random
-import re
-
 
 def focus_window(driver):
     # Get the window handle
@@ -567,29 +556,28 @@ def main():
         navigate_to_latest_chapter(selected_novel['url'], driver)
         
         # Step 5: Find, scrape and save the chapter
+        # Scrape specific chapter
         # chapter_num = 1
-        # if navigate_to_chapter(driver, 1):
+        # if navigate_to_chapter(driver, chapter_num):
         #     chapter_data = scrape_chapter(driver, 
         #                                         args.website, 
         #                                         novel_metadata['title'], 
         #                                         chapter_num, 
         #                                         save_dir = "novels")
 
-        # scrape_all_chapters(driver, 
-        #                     args.website, 
-        #                     novel_metadata, 
-        #                     save_dir = "novels")
+        # Scrape a range of chapters
+        # scrape_chapters_range(driver, 
+        #                         args.website, 
+        #                         novel_metadata, 
+        #                         1, 
+        #                         novel_metadata['total_chapters'], 
+        #                         save_dir = "novels")
 
-        scrape_chapters_range(driver, 
-                                args.website, 
-                                novel_metadata, 
-                                100, 
-                                236, 
-                                save_dir = "novels")
-
-        # Display results
-        # print(chapter_data["title"])
-        # print(chapter_data["content"])
+        # Scrape all chapters
+        scrape_all_chapters(driver, 
+                            args.website, 
+                            novel_metadata, 
+                            save_dir = "novels")
 
     except Exception as e:
         print(f"Exception: {str(e)}")
