@@ -29,3 +29,31 @@ The project is designed to be lightweight and efficient, making it suitable for 
    git clone https://github.com/omarsrstt/story_summarizer.git
    cd story_summarizer
    ```
+2. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Configure the `config.json` file with the appropriate website details and selectors.
+
+## Usage
+### Scraping Chapters
+To scrape chapters from a website, run the `scraper.py` script:
+
+```bash
+python scraper.py --website <website_name> --novel <novel_name> --chapter <chapter_number>
+```
+   - `website`: The name of the website to scrape from (as defined in config.json).
+   - `novel`: The name of the novel to scrape.
+   - `chapter`: (Optional) The specific chapter number to scrape. If omitted, all chapters will be scraped.
+
+### Summarizing Chapters
+To summarize the scraped chapters, run the `summarizer.py` script:
+
+```bash
+python summarizer.py --novel <novel_name> --model <model_name> --group-size <group_size> --chapters <chapter_selection>
+```
+
+   - `novel`: The name of the novel to summarize.
+   - `model`: (Optional) The NLP model to use for summarization (default: meta-llama/Meta-Llama-3.1-8B-Instruct).
+   - `group-size`: (Optional) The number of chapters to group together for summarization (default: 5).
+   - `chapters`: (Optional) Specific chapters or ranges to summarize (e.g., 1,3-5,7).
