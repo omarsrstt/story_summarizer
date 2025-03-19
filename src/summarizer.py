@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 # Configuration
 SUMMARY_GROUP_SIZE = 5  # Number of chapters to summarize together
+BATCH_SIZE = 2
 NOVEL_DIR = "novels"  # Base directory for novels
 NOVEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), NOVEL_DIR)
 MAX_LENGTH = 1024  # Max token length for local models
@@ -302,7 +303,61 @@ class LocalNovelSummarizer:
             
         return meta_summary
     
-    def generate_all_summaries(self):
+    def filter_chapters_by_numbers(self, sorted_chapters, chapter_numbers):
+        """Filter the sorted chapters list to include only the specified chapter numbers."""
+        if not chapter_numbers:
+            return sorted_chapters
+        
+        filtered_chapters = []
+        for num, file in sorted_chapters:
+            if num in chapter_numbers:
+                filtered_chapters.append((num, file))
+        
+        return filtered_chapters
+    
+    def parse_chapter_selection(self, chapter_selection):
+        """Parse a chapter selection string into a list of chapter numbers.
+        
+        Supports formats like:
+        - Single chapter: "5"
+        - Chapter range: "5-10"
+        - Multiple chapters: "1,3,5"
+        - Multiple ranges: "1-3,5-7"
+        - Combination: "1,3-5,7,9-11"
+        """
+        if not chapter_selection:
+            return None
+        
+        chapter_numbers = set()
+        
+        # Split by comma
+        parts = chapter_selection.split(',')
+        
+        for part in parts:
+            part = part.strip()
+            
+            # Check if it's a range
+            if '-' in part:
+                start, end = part.split('-')
+                try:
+                    start_num = int(start.strip())
+                    end_num = int(end.strip())
+                    
+                    # Add all chapters in the range
+                    for num in range(start_num, end_num + 1):
+                        chapter_numbers.add(num)
+                except ValueError:
+                    print(f"Warning: Invalid chapter range '{part}'. Skipping.")
+            else:
+                # Single chapter
+                try:
+                    chapter_numbers.add(int(part))
+                except ValueError:
+                    print(f"Warning: Invalid chapter number '{part}'. Skipping.")
+        
+        return sorted(list(chapter_numbers))
+    
+    def generate_all_summaries(self, selected_chapters=None):
         """Generate summaries for all chapter groups."""
         # Get sorted chapters
         with tqdm(total=1, desc="Finding and sorting chapters") as sort_bar:
@@ -313,6 +368,18 @@ class LocalNovelSummarizer:
             print(f"No chapters found for novel '{self.novel_name}'")
             return
         
+        # Parse selected chapters if provided
+        chapter_numbers = None
+        if selected_chapters:
+            chapter_numbers = self.parse_chapter_selection(selected_chapters)
+            if chapter_numbers:
+                print(f"Selected chapters: {chapter_numbers}")
+                sorted_chapters = self.filter_chapters_by_numbers(sorted_chapters, chapter_numbers)
+                
+                if not sorted_chapters:
+                    print(f"No matching chapters found for selection: {selected_chapters}")
+                    return
+
         # Group chapters
         chapter_groups = self.group_chapters(sorted_chapters)
         
@@ -353,7 +420,12 @@ class LocalNovelSummarizer:
         
         # Create a master summary file with all summaries
         with tqdm(total=1, desc="Creating master summary files") as master_bar:
-            master_summary_path = os.path.join(self.summaries_dir, "master_summary.txt")
+            # Create a suffix for the filename if we're doing selected chapters
+            file_suffix = ""
+            if selected_chapters:
+                file_suffix = "_selected"
+            
+            master_summary_path = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.txt")
             with open(master_summary_path, 'w', encoding='utf-8') as f:
                 for chapter_range, summary in all_summaries.items():
                     f.write(f"SUMMARY FOR CHAPTERS {chapter_range}\n")
@@ -362,13 +434,52 @@ class LocalNovelSummarizer:
                     f.write("\n\n" + "=" * 80 + "\n\n")
             
             # Also save as JSON for programmatic access
-            master_summary_json = os.path.join(self.summaries_dir, "master_summary.json")
+            master_summary_json = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.json")
             with open(master_summary_json, 'w', encoding='utf-8') as f:
                 json.dump(all_summaries, f, indent=2)
             
             master_bar.update(1)
             
         return all_summaries
+    
+    def summarize_specific_chapter(self, chapter_number):
+        """Generate a summary for a specific chapter."""
+        # Convert to integer if it's a string
+        if isinstance(chapter_number, str):
+            try:
+                chapter_number = int(chapter_number)
+            except ValueError:
+                print(f"Invalid chapter number: {chapter_number}")
+                return None
+        
+        # Get all chapters
+        sorted_chapters = self.get_sorted_chapters()
+        
+        # Find the specific chapter
+        chapter_file = None
+        for num, file in sorted_chapters:
+            if num == chapter_number:
+                chapter_file = file
+                break
+        
+        if not chapter_file:
+            print(f"Chapter {chapter_number} not found")
+            return None
+        
+        # Read the chapter content
+        content = self.read_chapter(chapter_file)
+        
+        # Generate summary
+        summary = self.generate_summary(content, [chapter_number])
+        
+        # Save summary to file
+        summary_filename = f"summary_chapter_{chapter_number}.txt"
+        summary_path = os.path.join(self.summaries_dir, summary_filename)
+        
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write(summary)
+        
+        return summary
     
     def generate_novel_overview(self, all_summaries):
         """Generate an overall summary of the entire novel."""
@@ -483,8 +594,10 @@ def main():
     parser.add_argument("--model", type=str, help="Model to use for summarization")
     parser.add_argument("--novel", type=str, help="Name of the novel to summarize")
     parser.add_argument("--group-size", type=int, default=SUMMARY_GROUP_SIZE, help="Number of chapters to group together")
-    parser.add_argument("--batch-size", type=int, default=2,
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
                        help="Batch size for chunk processing (GPU optimization)")
+    parser.add_argument("--chapters", type=str, help="Specific chapters to summarize (e.g., '1,3-5,7')")
+    parser.add_argument("--single-chapter", type=int, help="Summarize a single specific chapter")
     args = parser.parse_args()
     
     # List available novels
@@ -541,9 +654,35 @@ def main():
         group_size_input = input(f"Enter the number of chapters to group together (default: {SUMMARY_GROUP_SIZE}): ")
         group_size = int(group_size_input) if group_size_input.strip() else SUMMARY_GROUP_SIZE
     
+    # Handle chapter selection
+    selected_chapters = args.chapters
+    single_chapter = args.single_chapter
+    
+    if not selected_chapters and not single_chapter and not args.chapters and not args.single_chapter:
+        # Ask if the user wants to summarize specific chapters
+        summarize_all = input("\nDo you want to summarize all chapters? (y/n): ")
+        if summarize_all.lower() not in ["y", "yes"]:
+            chapter_selection_type = input("Do you want to summarize (1) a single chapter or (2) multiple chapters? (1/2): ")
+            
+            if chapter_selection_type == "1":
+                single_chapter_input = input("Enter the chapter number to summarize: ")
+                try:
+                    single_chapter = int(single_chapter_input)
+                except ValueError:
+                    print("Invalid chapter number. Will summarize all chapters.")
+            elif chapter_selection_type == "2":
+                selected_chapters = input("Enter chapter numbers or ranges (e.g., '1,3-5,7'): ")
+    
     print(f"\nProcessing novel: {selected_novel}")
     print(f"Using model: {selected_model}")
     print(f"Group size: {group_size}")
+
+    if single_chapter:
+        print(f"Summarizing single chapter: {single_chapter}")
+    elif selected_chapters:
+        print(f"Summarizing selected chapters: {selected_chapters}")
+    else:
+        print("Summarizing all chapters")
     
     # Confirm before proceeding (models can be large)
     confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? (y/n): ")
@@ -552,16 +691,31 @@ def main():
         return
     
     # Process the novel
-    summarizer = LocalNovelSummarizer(selected_novel, 
+    summarizer = LocalNovelSummarizer(selected_novel,
                                       selected_model, 
                                       group_size)
     all_summaries = summarizer.generate_all_summaries()
     
-    if all_summaries:
-        print("\nGenerating overall novel summary...")
-        summarizer.generate_novel_overview(all_summaries)
-    
-    print("\nSummarization complete!")
+    # Process the novel
+    if single_chapter:
+        # Summarize just one chapter
+        print(f"\nSummarizing chapter {single_chapter}...")
+        summary = summarizer.summarize_specific_chapter(single_chapter)
+        if summary:
+            print(f"\nSummary for chapter {single_chapter} created successfully!")
+        else:
+            print(f"\nFailed to summarize chapter {single_chapter}.")
+    else:
+        # Summarize multiple chapters or all chapters
+        all_summaries = summarizer.generate_all_summaries(selected_chapters)
+        
+        if all_summaries:
+            # Only generate overview if we're summarizing all chapters or a substantial portion
+            if not selected_chapters or len(all_summaries) > 3:
+                print("\nGenerating overall novel summary...")
+                summarizer.generate_novel_overview(all_summaries)
+        
+        print("\nSummarization complete!")
 
 if __name__ == "__main__":
     main()
