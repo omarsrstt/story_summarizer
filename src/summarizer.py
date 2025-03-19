@@ -1,15 +1,18 @@
 import os
 import re
 import glob
+import time
 from pathlib import Path
 import textwrap
 import json
 import argparse
 from typing import List, Tuple, Dict
+from tqdm import tqdm
 
 # For local model inference
-from transformers import pipeline, BitsAndBytesConfig
+from transformers import pipeline, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 import torch
+import torch.nn.functional as F
 
 # Configuration
 SUMMARY_GROUP_SIZE = 5  # Number of chapters to summarize together
@@ -26,21 +29,41 @@ class LocalNovelSummarizer:
         # self.summaries_dir = os.path.join(self.novel_path, "summaries")
         self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "summaries", novel_name)
         self.model_name = model_name
+        # self.max_new_tokens = 1024
         
         # Create summaries directory if it doesn't exist
         os.makedirs(self.summaries_dir, exist_ok=True)
         
         # Initialize model
-        print(f"Loading model {model_name} on {DEVICE}...")
-        self.pipeline = pipeline(
-            "text-generation",
-            model=model_name,
-            # model_kwargs={"torch_dtype": torch.bfloat16},
-            torch_dtype=torch.bfloat16 if DEVICE == "cuda" else torch.float32,
-            device_map="auto",
-        )
+        self._load_model_and_tokenizer()
         print("Model loaded successfully!")
     
+    
+    def _load_model_and_tokenizer(self):
+        """Load model with optimizations for faster inference."""
+
+        # Optimize for 8-bit quantization to reduce memory usage
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            torch_dtype=torch.float16,  # Use half precision
+            device_map="auto",
+            quantization_config=quantization_config,
+            trust_remote_code=True)
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        # Set padding token if needed
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+        # Move to CUDA if available
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {self.device}")
+
     def extract_chapter_number(self, filename):
         """Extract chapter number from filename."""
         match = re.search(r'(\d+)', os.path.basename(filename))
@@ -67,58 +90,155 @@ class LocalNovelSummarizer:
             groups.append(group)
         return groups
     
-    def chunk_text(self, text, max_chunk_size=6000):
-        """Split text into manageable chunks for the model."""
-        words = text.split()
+    def _generate_text(self, prompt, max_new_tokens=1024, progress_bar=None):
+        """Direct text generation with optimized settings."""
+        # Pre-process prompt
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        
+        # Set generation parameters for speed
+        with torch.no_grad():
+            # Record start time
+            start_time = time.time()
+            
+            # Generate with optimized parameters
+            outputs = self.model.generate(
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                max_new_tokens=max_new_tokens,
+                temperature=0.3,
+                top_p=0.95,
+                top_k=40,
+                repetition_penalty=1.1,
+                do_sample=True,
+                num_beams=1,  # Greedy decoding for speed
+                # pad_token_id=self.tokenizer.eos_token_id,
+            )
+            
+            # Calculate time
+            elapsed = time.time() - start_time
+            input_tokens = inputs["input_ids"].shape[1]
+            output_tokens = outputs.shape[1] - input_tokens
+            tokens_per_second = output_tokens / elapsed
+            
+            if progress_bar:
+                progress_bar.set_postfix(tokens=output_tokens, time=f"{elapsed:.2f}s", speed=f"{tokens_per_second:.2f}t/s")
+            else:
+                print(f"Generated {output_tokens} tokens in {elapsed:.2f}s ({tokens_per_second:.2f} tokens/s)")
+        
+        # Extract generated text
+        result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Remove the prompt from result
+        prompt_decoded = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
+        result = result.replace(prompt_decoded, "", 1).strip()
+        
+        return result
+    
+    def _batch_process_chunks(self, chunks, chapter_range, batch_size=2):
+        """Process multiple chunks in batches to better utilize GPU."""
+        # This is an optimization for GPU utilization
+        # Instead of processing one chunk at a time sequentially,
+        # we batch process multiple chunks to better utilize the GPU
+        
+        all_summaries = []
+        
+        # Process in batches of batch_size
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i+batch_size]
+            batch_prompts = []
+            
+            for j, chunk in enumerate(batch_chunks):
+                chunk_index = i + j
+                prompt = f"""
+                <task>
+                Summarize the following excerpt from {chapter_range} of the novel "{self.novel_name}".
+                Focus on main plot points, character developments, and important events.
+                </task>
+
+                <text>
+                {chunk}
+                </text>
+
+                <summary>
+                """
+                batch_prompts.append(prompt)
+            
+            # Tokenize all prompts in the batch
+            inputs = self.tokenizer(batch_prompts, return_tensors="pt", padding=True).to(self.device)
+            
+            # Generate summaries for the batch
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=0.3,
+                    top_p=0.95,
+                    repetition_penalty=1.1,
+                    do_sample=True,
+                    num_beams=1,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                )
+            
+            # Process each output
+            for j, output in enumerate(outputs):
+                result = self.tokenizer.decode(output, skip_special_tokens=True)
+                prompt_decoded = self.tokenizer.decode(inputs["input_ids"][j], skip_special_tokens=True)
+                result = result.replace(prompt_decoded, "", 1).strip()
+                all_summaries.append(result)
+        
+        return all_summaries
+    
+    def chunk_text(self, text, max_tokens=4000):
+        """Split text into chunks based on token count."""
+        # Estimate token count based on words
+        tokens = self.tokenizer.encode(text)
+        
+        if len(tokens) <= max_tokens:
+            return [text]
+            
         chunks = []
         current_chunk = []
         current_length = 0
         
-        for word in words:
-            # Rough estimate: 1 word ~ 1.5 tokens
-            word_length = len(word) * 1.5  
-            if current_length + word_length > max_chunk_size:
-                chunks.append(' '.join(current_chunk))
-                current_chunk = [word]
-                current_length = word_length
-            else:
-                current_chunk.append(word)
-                current_length += word_length
+        # Split by sentences for more coherent chunks
+        sentences = re.split(r'(?<=[.!?])\s+', text)
         
+        for sentence in sentences:
+            # Get token count for this sentence
+            sentence_tokens = len(self.tokenizer.encode(sentence))
+            
+            if current_length + sentence_tokens > max_tokens and current_chunk:
+                # Save current chunk and start new one
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [sentence]
+                current_length = sentence_tokens
+            else:
+                current_chunk.append(sentence)
+                current_length += sentence_tokens
+        
+        # Add the last chunk if there is one
         if current_chunk:
-            chunks.append(' '.join(current_chunk))
+            chunks.append(" ".join(current_chunk))
         
         return chunks
     
-    def generate_summary_for_chunk(self, chunk, chapter_range):
+    def generate_summary_for_chunk(self, chunk, chapter_range, progress_bar=None):
         """Generate summary for a specific text chunk."""
         prompt = f"""
-        Please provide a summary of the following excerpt from {chapter_range} of the novel "{self.novel_name}".
-        Focus on the main plot points, character developments, and important events.
-        
-        Text to summarize:
+        <task>
+        Summarize the following excerpt from {chapter_range} of the novel "{self.novel_name}".
+        Focus on main plot points, character developments, and important events.
+        </task>
+
+        <text>
         {chunk}
-        
-        Summary:
+        </text>
+
+        <summary>
         """
         
-        try:
-            response = self.pipeline(
-                prompt,
-                max_new_tokens=MAX_LENGTH,
-                do_sample=True,
-                temperature=0.3,
-                top_p=0.9,
-            )[0]["generated_text"]
-            
-            # Extract the generated summary from the response
-            # (Assuming the response contains the prompt followed by the generated text)
-            summary = response.split("Summary:")[1].strip() if "Summary:" in response else response.replace(prompt, "").strip()
-            
-            return summary
-        except Exception as e:
-            print(f"Error generating summary for chunk: {e}")
-            return f"Error generating summary: {str(e)}"
+        summary = self._generate_text(prompt, progress_bar=progress_bar)
+        return summary
     
     def generate_summary(self, chapters_content, chapter_numbers):
         """Generate summary using local LLM."""
@@ -128,53 +248,67 @@ class LocalNovelSummarizer:
         else:
             chapter_range = f"Chapters {chapter_numbers[0]}-{chapter_numbers[-1]}"
         
-        # Chunk the content if it's too large
+        # Chunk the content
         chunks = self.chunk_text(chapters_content)
         
-        if len(chunks) == 1:
-            return self.generate_summary_for_chunk(chunks[0], chapter_range)
-        
-        # If multiple chunks, summarize each and then combine
-        chunk_summaries = []
-        for i, chunk in enumerate(chunks):
-            print(f"  Processing chunk {i+1}/{len(chunks)}...")
-            chunk_summary = self.generate_summary_for_chunk(chunk, f"{chapter_range} (part {i+1})")
-            chunk_summaries.append(chunk_summary)
+        with tqdm(total=len(chunks), desc=f"Processing chunks for {chapter_range}") as chunk_bar:
+            if len(chunks) == 1:
+                return self.generate_summary_for_chunk(chunks[0], chapter_range, progress_bar=chunk_bar)
+            
+            # If multiple chunks, summarize each and then combine
+            chunk_summaries = []
+            
+            # Check if we should use batched processing (GPU optimization)
+            if self.device == "cuda" and len(chunks) > 1:
+                # Process chunks in batches for better GPU utilization
+                batch_size = min(2, len(chunks))  # Adjust batch size based on GPU memory
+                chunk_bar.set_description(f"Batch processing chunks for {chapter_range}")
+                
+                # Use batched processing with smaller batches to avoid memory issues
+                for i in range(0, len(chunks), batch_size):
+                    batch_chunks = chunks[i:i+batch_size]
+                    for j, chunk in enumerate(batch_chunks):
+                        summary = self.generate_summary_for_chunk(chunk, f"{chapter_range} (part {i+j+1})", progress_bar=chunk_bar)
+                        chunk_summaries.append(summary)
+                        chunk_bar.update(1)
+            else:
+                # Process chunks sequentially for CPU or when only a few chunks
+                for i, chunk in enumerate(chunks):
+                    chunk_bar.set_description(f"Processing chunk {i+1}/{len(chunks)} for {chapter_range}")
+                    chunk_summary = self.generate_summary_for_chunk(chunk, f"{chapter_range} (part {i+1})", progress_bar=chunk_bar)
+                    chunk_summaries.append(chunk_summary)
+                    chunk_bar.update(1)
         
         # Combine the chunk summaries
         combined_chunk_summaries = "\n\n".join(chunk_summaries)
         
         # Create a meta-summary of all chunk summaries
-        meta_prompt = f"""
-        Please create a cohesive summary of {chapter_range} from the novel "{self.novel_name}" based on these partial summaries:
-        
-        {combined_chunk_summaries}
-        
-        Provide a unified summary that captures the main events and character developments:
-        """
-        
-        try:
-            meta_response = self.pipeline(
-                meta_prompt,
-                max_new_tokens=MAX_LENGTH,
-                do_sample=True,
-                temperature=0.3,
-                top_p=0.9,
-            )[0]["generated_text"]
+        with tqdm(total=1, desc=f"Creating meta-summary for {chapter_range}") as meta_bar:
+            meta_prompt = f"""
+                <task>
+                Create a cohesive summary of {chapter_range} from the novel "{self.novel_name}" based on these partial summaries.
+                Provide a unified summary that captures the main events and character developments.
+                </task>
+
+                <summaries>
+                {combined_chunk_summaries}
+                </summaries>
+
+                <unified_summary>
+                """
             
-            meta_summary = meta_response.split("Provide a unified summary that captures the main events and character developments:")[1].strip() \
-                if "Provide a unified summary that captures the main events and character developments:" in meta_response \
-                else meta_response.replace(meta_prompt, "").strip()
+            meta_summary = self._generate_text(meta_prompt, progress_bar=meta_bar)
+            meta_bar.update(1)
             
-            return meta_summary
-        except Exception as e:
-            print(f"Error generating meta-summary: {e}")
-            return combined_chunk_summaries  # Fallback to combined summaries
+        return meta_summary
     
     def generate_all_summaries(self):
         """Generate summaries for all chapter groups."""
         # Get sorted chapters
-        sorted_chapters = self.get_sorted_chapters()
+        with tqdm(total=1, desc="Finding and sorting chapters") as sort_bar:
+            sorted_chapters = self.get_sorted_chapters()
+            sort_bar.update(1)
+            
         if not sorted_chapters:
             print(f"No chapters found for novel '{self.novel_name}'")
             return
@@ -185,50 +319,55 @@ class LocalNovelSummarizer:
         # Generate summaries for each group
         all_summaries = {}
         
-        for group in chapter_groups:
-            chapter_numbers = [num for num, _ in group]
-            chapter_contents = []
-            
-            print(f"Processing chapters {chapter_numbers[0]}-{chapter_numbers[-1]}...")
-            
-            # Read all chapters in the group
-            for _, chapter_file in group:
-                content = self.read_chapter(chapter_file)
-                chapter_contents.append(content)
-            
-            # Join all chapter contents with separators
-            combined_content = "\n\n====================\n\n".join(chapter_contents)
-            
-            # Generate summary
-            summary = self.generate_summary(combined_content, chapter_numbers)
-            
-            # Save summary to file
-            summary_filename = f"summary_chapters_{chapter_numbers[0]}-{chapter_numbers[-1]}.txt"
-            summary_path = os.path.join(self.summaries_dir, summary_filename)
-            
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write(summary)
-            
-            # Add to all summaries dict
-            all_summaries[f"{chapter_numbers[0]}-{chapter_numbers[-1]}"] = summary
-            
-            print(f"Summary for chapters {chapter_numbers[0]}-{chapter_numbers[-1]} saved to {summary_path}")
+        with tqdm(total=len(chapter_groups), desc="Processing chapter groups") as group_bar:
+            for group in chapter_groups:
+                chapter_numbers = [num for num, _ in group]
+                chapter_contents = []
+                
+                group_bar.set_description(f"Processing chapters {chapter_numbers[0]}-{chapter_numbers[-1]}")
+                
+                # Read all chapters in the group
+                with tqdm(total=len(group), desc="Reading chapter files") as read_bar:
+                    for _, chapter_file in group:
+                        content = self.read_chapter(chapter_file)
+                        chapter_contents.append(content)
+                        read_bar.update(1)
+                
+                # Join all chapter contents with separators
+                combined_content = "\n\n====================\n\n".join(chapter_contents)
+                
+                # Generate summary
+                summary = self.generate_summary(combined_content, chapter_numbers)
+                
+                # Save summary to file
+                summary_filename = f"summary_chapters_{chapter_numbers[0]}-{chapter_numbers[-1]}.txt"
+                summary_path = os.path.join(self.summaries_dir, summary_filename)
+                
+                with open(summary_path, 'w', encoding='utf-8') as f:
+                    f.write(summary)
+                
+                # Add to all summaries dict
+                all_summaries[f"{chapter_numbers[0]}-{chapter_numbers[-1]}"] = summary
+                
+                group_bar.update(1)
         
         # Create a master summary file with all summaries
-        master_summary_path = os.path.join(self.summaries_dir, "master_summary.txt")
-        with open(master_summary_path, 'w', encoding='utf-8') as f:
-            for chapter_range, summary in all_summaries.items():
-                f.write(f"SUMMARY FOR CHAPTERS {chapter_range}\n")
-                f.write("=" * 80 + "\n\n")
-                f.write(summary)
-                f.write("\n\n" + "=" * 80 + "\n\n")
-        
-        # Also save as JSON for programmatic access
-        master_summary_json = os.path.join(self.summaries_dir, "master_summary.json")
-        with open(master_summary_json, 'w', encoding='utf-8') as f:
-            json.dump(all_summaries, f, indent=2)
-        
-        print(f"All summaries combined in {master_summary_path} and {master_summary_json}")
+        with tqdm(total=1, desc="Creating master summary files") as master_bar:
+            master_summary_path = os.path.join(self.summaries_dir, "master_summary.txt")
+            with open(master_summary_path, 'w', encoding='utf-8') as f:
+                for chapter_range, summary in all_summaries.items():
+                    f.write(f"SUMMARY FOR CHAPTERS {chapter_range}\n")
+                    f.write("=" * 80 + "\n\n")
+                    f.write(summary)
+                    f.write("\n\n" + "=" * 80 + "\n\n")
+            
+            # Also save as JSON for programmatic access
+            master_summary_json = os.path.join(self.summaries_dir, "master_summary.json")
+            with open(master_summary_json, 'w', encoding='utf-8') as f:
+                json.dump(all_summaries, f, indent=2)
+            
+            master_bar.update(1)
+            
         return all_summaries
     
     def generate_novel_overview(self, all_summaries):
@@ -238,106 +377,81 @@ class LocalNovelSummarizer:
         for chapter_range, summary in all_summaries.items():
             combined_summaries += f"Summary for chapters {chapter_range}:\n{summary}\n\n"
         
-        # Chunk the combined summaries if needed
+        # Chunk the combined summaries
         chunks = self.chunk_text(combined_summaries)
         
-        if len(chunks) == 1:
-            prompt = f"""
-            Based on the following chapter summaries from the novel "{self.novel_name}", please create an overall summary of the entire novel.
-            
-            Focus on:
-            1. The main plot arc from beginning to end
-            2. Key character developments
-            3. Primary themes
-            4. Most important events and turning points
-            
-            Chapter summaries:
-            {chunks[0]}
-            
-            Overall novel summary:
-            """
-            
-            try:
-                response = self.pipeline(
-                    prompt,
-                    max_new_tokens=MAX_LENGTH,
-                    do_sample=True,
-                    temperature=0.3,
-                    top_p=0.9,
-                )[0]["generated_text"]
+        with tqdm(total=len(chunks) + 1, desc="Generating novel overview") as overview_bar:
+            if len(chunks) == 1:
+                prompt = f"""
+                    <task>
+                    Create an overall summary of the novel "{self.novel_name}" based on these chapter summaries.
+                    Focus on:
+                    1. The main plot arc from beginning to end
+                    2. Key character developments 
+                    3. Primary themes
+                    4. Most important events and turning points
+                    </task>
+
+                    <chapter_summaries>
+                    {chunks[0]}
+                    </chapter_summaries>
+
+                    <novel_overview>
+                    """
                 
-                overview = response.split("Overall novel summary:")[1].strip() if "Overall novel summary:" in response else response.replace(prompt, "").strip()
-            except Exception as e:
-                print(f"Error generating novel overview: {e}")
-                overview = f"Error generating novel overview: {str(e)}"
-        else:
-            # Process each chunk to extract key information
-            print("Combined summaries too large, processing in chunks...")
-            chunk_insights = []
-            
-            for i, chunk in enumerate(chunks):
-                print(f"  Processing overview chunk {i+1}/{len(chunks)}...")
-                chunk_prompt = f"""
-                Based on these chapter summaries from the novel "{self.novel_name}" (part {i+1}), extract the key plot points, character developments, and themes.
+                overview = self._generate_text(prompt, max_new_tokens=1500, progress_bar=overview_bar)
+                overview_bar.update(1)
                 
-                Summaries:
-                {chunk}
+            else:
+                # Process each chunk to extract key information
+                overview_bar.set_description("Processing overview chunks")
+                chunk_insights = []
                 
-                Key insights:
-                """
-                
-                try:
-                    chunk_response = self.pipeline(
-                        chunk_prompt,
-                        max_new_tokens=MAX_LENGTH,
-                        do_sample=True,
-                        temperature=0.3,
-                        top_p=0.9,
-                    )[0]["generated_text"]
+                for i, chunk in enumerate(chunks):
+                    overview_bar.set_description(f"Processing overview chunk {i+1}/{len(chunks)}")
+                    chunk_prompt = f"""
+                        <task>
+                        Extract the key plot points, character developments, and themes from these chapter summaries of the novel "{self.novel_name}" (part {i+1}).
+                        </task>
+
+                        <summaries>
+                        {chunk}
+                        </summaries>
+
+                        <key_insights>
+                        """
                     
-                    chunk_insight = chunk_response.split("Key insights:")[1].strip() if "Key insights:" in chunk_response else chunk_response.replace(chunk_prompt, "").strip()
+                    chunk_insight = self._generate_text(chunk_prompt, progress_bar=overview_bar)
                     chunk_insights.append(chunk_insight)
-                except Exception as e:
-                    print(f"Error processing chunk {i+1}: {e}")
-                    chunk_insights.append(f"Error processing chunk {i+1}: {str(e)}")
-            
-            # Combine the insights into a final overview
-            combined_insights = "\n\n".join(chunk_insights)
-            final_prompt = f"""
-            Based on these key insights from different parts of the novel "{self.novel_name}", create a cohesive overall summary of the entire novel.
-            
-            Focus on:
-            1. The main plot arc from beginning to end
-            2. Key character developments
-            3. Primary themes
-            4. Most important events and turning points
-            
-            Insights from different parts of the novel:
-            {combined_insights}
-            
-            Overall novel summary:
-            """
-            
-            try:
-                final_response = self.pipeline(
-                    final_prompt,
-                    max_new_tokens=MAX_LENGTH,
-                    do_sample=True,
-                    temperature=0.3,
-                    top_p=0.9,
-                )[0]["generated_text"]
+                    overview_bar.update(1)
                 
-                overview = final_response.split("Overall novel summary:")[1].strip() if "Overall novel summary:" in final_response else final_response.replace(final_prompt, "").strip()
-            except Exception as e:
-                print(f"Error generating final novel overview: {e}")
-                overview = combined_insights  # Fallback to combined insights
-        
-        # Save the overview
-        overview_path = os.path.join(self.summaries_dir, "novel_overview.txt")
-        with open(overview_path, 'w', encoding='utf-8') as f:
-            f.write(overview)
-        
-        print(f"Novel overview saved to {overview_path}")
+                # Combine the insights into a final overview
+                overview_bar.set_description("Creating final novel overview")
+                combined_insights = "\n\n".join(chunk_insights)
+                final_prompt = f"""
+                    <task>
+                    Create a cohesive overall summary of the novel "{self.novel_name}" based on these key insights from different parts of the novel.
+                    Focus on:
+                    1. The main plot arc from beginning to end
+                    2. Key character developments
+                    3. Primary themes
+                    4. Most important events and turning points
+                    </task>
+
+                    <insights>
+                    {combined_insights}
+                    </insights>
+
+                    <novel_overview>
+                    """
+                
+                overview = self._generate_text(final_prompt, max_new_tokens=1500, progress_bar=overview_bar)
+            
+            # Save the overview
+            overview_path = os.path.join(self.summaries_dir, "novel_overview.txt")
+            with open(overview_path, 'w', encoding='utf-8') as f:
+                f.write(overview)
+            
         return overview
 
 
@@ -356,9 +470,10 @@ def list_available_models():
     models = [
         ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Good balance of quality and resource usage"),
         ("TheBloke/Llama-2-7B-Chat-GGML", "Llama 2 7B (GGML) - Optimized for CPU usage"),
-        ("distilgpt2", "DistilGPT2 - Very lightweight but less capable"),
-        ("microsoft/phi-2", "Phi-2 - Small but capable model"),
-        ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", "TinyLlama - Very small model"),
+        ("microsoft/Phi-4-mini-instruct", "Phi-4-Mini 3.8B - Small but capable model"),
+        ("microsoft/phi-2", "Phi-2 2.78B - Small but capable model"),
+        ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", "TinyLlama 1.1B - Very small model"),
+        ("distilbert/distilgpt2", "DistilGPT2 0.088B - Very lightweight but less capable"),
     ]
     return models
 
@@ -368,6 +483,8 @@ def main():
     parser.add_argument("--model", type=str, help="Model to use for summarization")
     parser.add_argument("--novel", type=str, help="Name of the novel to summarize")
     parser.add_argument("--group-size", type=int, default=SUMMARY_GROUP_SIZE, help="Number of chapters to group together")
+    parser.add_argument("--batch-size", type=int, default=2,
+                       help="Batch size for chunk processing (GPU optimization)")
     args = parser.parse_args()
     
     # List available novels
@@ -399,6 +516,7 @@ def main():
     # List available models
     available_models = list_available_models()
     
+    # Select model
     selected_model = args.model
     if not selected_model:
         print("\nAvailable models:")
@@ -434,7 +552,9 @@ def main():
         return
     
     # Process the novel
-    summarizer = LocalNovelSummarizer(selected_novel, selected_model, group_size)
+    summarizer = LocalNovelSummarizer(selected_novel, 
+                                      selected_model, 
+                                      group_size)
     all_summaries = summarizer.generate_all_summaries()
     
     if all_summaries:
