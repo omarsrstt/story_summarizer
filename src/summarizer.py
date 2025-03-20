@@ -10,13 +10,13 @@ from typing import List, Tuple, Dict
 from tqdm import tqdm
 
 # For local model inference
-from transformers import pipeline, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn.functional as F
 
 # Configuration
 SUMMARY_GROUP_SIZE = 5  # Number of chapters to summarize together
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 NOVEL_DIR = "novels"  # Base directory for novels
 NOVEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), NOVEL_DIR)
 MAX_LENGTH = 1024  # Max token length for local models
@@ -43,16 +43,32 @@ class LocalNovelSummarizer:
     def _load_model_and_tokenizer(self):
         """Load model with optimizations for faster inference."""
 
+        # # No quantization
+        # quantization_config = None
+
+        # # Optimize for 8-bit quantization to reduce memory usage
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_8bit=True,
+        #     llm_int8_threshold=6.0,
+        #     llm_int8_enable_fp32_cpu_offload=True
+        # )
+
         # Optimize for 8-bit quantization to reduce memory usage
         quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0
+            load_in_4bit=True,  # Enable 4-bit quantization
+            bnb_4bit_use_double_quant=True,  # Optional: Further memory savings
+            bnb_4bit_quant_type="nf4",  # Use 4-bit NormalFloat quantization
+            bnb_4bit_compute_dtype=torch.float16  # Compute dtype for 4-bit
         )
+
+        config = AutoConfig.from_pretrained(self.model_name,
+                                            use_sdpa=False)
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float16,  # Use half precision
             device_map="auto",
+            config=config,
             quantization_config=quantization_config,
             trust_remote_code=True)
         
@@ -579,12 +595,13 @@ def list_available_novels():
 def list_available_models():
     """List some popular lightweight models suitable for text summarization."""
     models = [
+        ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Good balance of quality and resource usage with long context length"),
         ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Good balance of quality and resource usage"),
         ("TheBloke/Llama-2-7B-Chat-GGML", "Llama 2 7B (GGML) - Optimized for CPU usage"),
-        ("microsoft/Phi-4-mini-instruct", "Phi-4-Mini 3.8B - Small but capable model"),
-        ("microsoft/phi-2", "Phi-2 2.78B - Small but capable model"),
-        ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", "TinyLlama 1.1B - Very small model"),
-        ("distilbert/distilgpt2", "DistilGPT2 0.088B - Very lightweight but less capable"),
+        ("meta-llama/Llama-3.2-3B-Instruct", "Llama 3.2 3.2B Instruct - Medium weight model"),
+        ("pszemraj/led-large-book-summary", "Booksum dataset 0.46B - Lightweight 16384"),
+        ("facebook/bart-large-cnn", "BART CNN Dailymail 0.4B - Lightweight"),
+        ("Falconsai/text_summarization", "Finetuned T5 Small 0.06B - Very lightweight 1000"),
     ]
     return models
 
