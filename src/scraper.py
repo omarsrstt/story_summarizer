@@ -84,21 +84,18 @@ def search_novels(query, website, driver):
 
 def select_novel(novel_name, website, driver):
     """Search across all websites and let user select a novel"""
-    try:
-        all_results = []
-        
+    try:        
         # Search for novels
         results = search_novels(novel_name, website, driver)
-        all_results.extend(results)
             
         # Handle no results case
-        if not all_results:
+        if not results:
             print("No novels found with that name.")
             return None
             
         # Print results
-        print(f"Found {len(all_results)} matches:")
-        novels_found = [{"#": i, **result} for i, result in enumerate(all_results, 1)]
+        print(f"Found {len(results)} matches:")
+        novels_found = [{"#": i, **result} for i, result in enumerate(results, 1)]
         print(tabulate(novels_found, headers="keys", tablefmt="pretty"))
 
         # Get user selection (or auto-select if only one result)
