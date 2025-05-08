@@ -419,28 +419,6 @@ def scrape_all_chapters(driver, website, novel_metadata, save_dir = "novels"):
         except Exception as e:
             print(f"Error scraping Chapter {chapter_num}: {e}")
 
-def scrape_chapters_range(driver, website, novel_metadata, start_range, stop_range, save_dir = "novels"):
-    """
-    Scrape all chapters of a novel and save them to files.
-
-    Args:
-        driver: Selenium WebDriver instance.
-        website (dict): Website configuration containing CSS selectors.
-        novel_metadata (dict): Metadata of the novel, including 'title' and 'total_chapters'.
-        save_dir (str): Directory to save the chapters.
-    """
-    for chapter_num in range(start_range, stop_range + 1):
-        try:
-            # Navigate to the chapter
-            if navigate_to_chapter(driver, chapter_num):
-                # Scrape and save the chapter
-                scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir)
-                print(f"Successfully scraped Chapter {chapter_num}")
-            else:
-                print(f"Failed to navigate to Chapter {chapter_num}")
-        except Exception as e:
-            print(f"Error scraping Chapter {chapter_num}: {e}")
-
 def parse_chapter_input(chap_num, max_chapters=None):
     if chap_num is None:
         return list(range(1, max_chapters + 1)) if max_chapters else None
