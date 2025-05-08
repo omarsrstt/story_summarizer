@@ -40,11 +40,11 @@ The project is designed to be lightweight and efficient, making it suitable for 
 To scrape chapters from a website, run the `scraper.py` script:
 
 ```bash
-python scraper.py --website <website_name> --novel <novel_name> --chapter <chapter_number>
+python scraper.py --website <website_name> --novel <novel_name> --chapter_num <chapter_number>
 ```
    - `website`: The name of the website to scrape from (as defined in config.json).
    - `novel`: The name of the novel to scrape.
-   - `chapter`: (Optional) The specific chapter number to scrape. If omitted, all chapters will be scraped.
+   - `chapter_num`: (Optional) The specific chapter number to scrape. If omitted, all chapters will be scraped.
 
 ### Summarizing Chapters
 To summarize the scraped chapters, run the `summarizer.py` script:
