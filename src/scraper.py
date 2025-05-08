@@ -305,7 +305,8 @@ def navigate_to_chapter(driver, chapter_number):
         time.sleep(2.5)  # Wait for the chapter page to load
         # Check if navigation was successful
         WebDriverWait(driver, 10).until(
-            lambda d: d.current_url != previous_url
+            lambda d: d.current_url != previous_url or
+                is_chapter_content_visible(d, chapter_number)
         )
 
         print(f"Navigated to Chapter {chapter_number}")
@@ -423,6 +424,9 @@ def parse_chapter_input(chap_num, max_chapters=None):
     if chap_num is None:
         return list(range(1, max_chapters + 1)) if max_chapters else None
     
+    if chap_num in ["recent", "final", "last", "end"]:
+        return [max_chapters]
+
     chapters = set()
     
     # Split by commas first (handles cases like "1,3,5-7")
@@ -469,6 +473,29 @@ def scrape_chapters(driver, website, novel_metadata, chap_num=None, save_dir="no
     for chapter_num in chapters_to_scrape:
         if navigate_to_chapter(driver, chapter_num):
             scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir=save_dir)
+
+def is_chapter_content_visible(driver, chapter_num):
+    """Multi-layered content verification"""
+    checks = [
+        # Option 1: Check chapter title in DOM
+        lambda: bool(driver.find_elements(
+            By.XPATH, f"//*[contains(translate(., 'CHAPTER', 'chapter'), 'chapter {chapter_num}')]")),
+            
+        # Option 2: Check for visible chapter content
+        lambda: bool(driver.find_elements(
+            By.CSS_SELECTOR, "div.chapter-content:not([style*='display:none'])")),
+            
+        # Option 3: Check for loading spinner disappearance
+        lambda: not driver.find_elements(
+            By.CSS_SELECTOR, "div.loader, div.spinner"),
+            
+        # Option 4: JavaScript DOM check
+        lambda: driver.execute_script(
+            """return /chapter.{0,3}%d/i.test(document.body.innerText)""" % chapter_num)
+    ]
+    
+    # Return True if any check passes
+    return any(check() for check in checks)
 
 def setup_driver():
     options = uc.ChromeOptions()
