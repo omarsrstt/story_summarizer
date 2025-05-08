@@ -252,9 +252,9 @@ def navigate_to_latest_chapter(novel_url, driver):
         # Locate the "Latest Chapters" section
         latest_chapters = driver.find_element(By.CLASS_NAME, "ul-list5")
 
-        # Click the first chapter in the "Latest Chapters" section
-        first_chapter = latest_chapters.find_element(By.TAG_NAME, "a")
-        first_chapter.click()
+        # Click the most recent chapter in the "Latest Chapters" section
+        most_recent_chapter = latest_chapters.find_element(By.TAG_NAME, "a")
+        most_recent_chapter.click()
         time.sleep(2.5)  # Wait for the chapter page to load
 
         print("Navigated to a random chapter from the homepage.")
@@ -272,22 +272,27 @@ def navigate_to_chapter(driver, chapter_number):
     """
     try:
         print(f"Navigating to Chapter {chapter_number}")
+        previous_url = driver.current_url
+
+        # Keep window in the foreground
+        driver.maximize_window()
+        driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.NULL)  # Fake interaction
+        
         # Wait for the dropdown icon to be clickable
-        dropdown_icon = WebDriverWait(driver, 10).until(
+        dropdown_icon = WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable((By.CLASS_NAME, "glyphicon-list-alt"))
         )
         
         # Click the dropdown icon to expand the list of chapters
-        dropdown_icon.click()
-        time.sleep(0.5)  # Wait for the dropdown to fully expand
+        driver.execute_script("arguments[0].click();", dropdown_icon)
+        time.sleep(1.0)  # Wait for the dropdown to load
 
         # Locate the dropdown list of chapters
-        chapter_list = driver.find_element(By.CLASS_NAME, "select-chapter")
+        chapter_list = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "select-chapter"))
+        )
 
         # Find the desired chapter option
-        # chapter_option = chapter_list.find_element(
-        #     By.XPATH, f"//option[contains(text(), 'Chapter {chapter_number}:') or contains(text(), 'Chapter {chapter_number} ')]"
-        # )
         chapter_option = chapter_list.find_element(
             By.XPATH, f"//option[contains(text(), 'Chapter {chapter_number}')]"
         )
@@ -295,10 +300,13 @@ def navigate_to_chapter(driver, chapter_number):
         # Scroll the dropdown to make the chapter option visible
         driver.execute_script("arguments[0].scrollIntoView();", chapter_option)
         time.sleep(0.5)  # Wait for scrolling to complete
-
         # Click the chapter option to navigate to the chapter
         chapter_option.click()
         time.sleep(2.5)  # Wait for the chapter page to load
+        # Check if navigation was successful
+        WebDriverWait(driver, 10).until(
+            lambda d: d.current_url != previous_url
+        )
 
         print(f"Navigated to Chapter {chapter_number}")
         return True
@@ -433,6 +441,56 @@ def scrape_chapters_range(driver, website, novel_metadata, start_range, stop_ran
         except Exception as e:
             print(f"Error scraping Chapter {chapter_num}: {e}")
 
+def parse_chapter_input(chap_num, max_chapters=None):
+    if chap_num is None:
+        return list(range(1, max_chapters + 1)) if max_chapters else None
+    
+    chapters = set()
+    
+    # Split by commas first (handles cases like "1,3,5-7")
+    parts = chap_num.split(",")
+    
+    for part in parts:
+        part = part.strip()
+        if "-" in part:     # Handle ranges (e.g., "10-15")
+            start, end = map(int, part.split("-"))
+            chapters.update(range(start, end + 1))
+        else:
+            # Handle single numbers (e.g., "5")
+            chapters.add(int(part))
+    
+    # Filter out chapters beyond max_chapters (if provided)
+    if max_chapters:
+        chapters = {ch for ch in chapters if 0 <= ch <= max_chapters}
+    
+    return sorted(chapters)
+
+def scrape_chapters(driver, website, novel_metadata, chap_num=None, save_dir="novels"):
+    max_chapters = novel_metadata.get("total_chapters")
+    
+    # Get list of all chapter numbers to be scraped
+    chapters_to_scrape = parse_chapter_input(chap_num, max_chapters)
+    
+    if not chapters_to_scrape:
+        print("No valid chapters to scrape.")
+        return
+    
+    # Case 1: Scrape all chapters (chap_num is None)
+    if chap_num is None:
+        scrape_all_chapters(driver, website, novel_metadata, save_dir=save_dir)
+        return
+    
+    # Case 2: Scrape a single chapter (optimized path)
+    if len(chapters_to_scrape) == 1:
+        chapter_num = chapters_to_scrape[0]
+        if navigate_to_chapter(driver, chapter_num):
+            scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir=save_dir)
+        return
+    
+    # Case 3: Scrape multiple chapters (individual or ranges)
+    for chapter_num in chapters_to_scrape:
+        if navigate_to_chapter(driver, chapter_num):
+            scrape_chapter(driver, website, novel_metadata['title'], chapter_num, save_dir=save_dir)
 
 def setup_driver():
     options = uc.ChromeOptions()
@@ -482,7 +540,7 @@ def parse_arguments(websites):
         type=str,
     )
     parser.add_argument(
-        "--chapter",
+        "--chapter_num",
         type=int,
         required=False,
         default=None,
@@ -508,8 +566,8 @@ def get_missing_args(args, config):
     
     if args.novel is None:
         args.novel = config["novel"] if config["novel"] else input("Enter the novel name: ")
-    if args.chapter is None:
-        args.chapter = config["chapter"] if config["chapter"] else input("Enter the chapter number: ")
+    if args.chapter_num is None:
+        args.chapter_num = config["chapter_num"] if config["chapter_num"] else str(input("Enter the chapter number: "))
     return args
 
 def main():
@@ -534,6 +592,7 @@ def main():
         # print(tabulate(novels_found, headers="keys", tablefmt="pretty"))
         selected_novel = select_novel(args.novel, website=args.website, driver=driver)
         if not selected_novel:
+            print("Novel wasn't selected")
             return
         print(f"\nSelected: {selected_novel['novel']['title']}")
 
@@ -544,7 +603,7 @@ def main():
             print(f"Title: {novel_metadata['title']}")
             print(f"Author: {novel_metadata['author']}")
             print(f"Description: {novel_metadata['description']}")
-            print(f"Total Chapters: {novel_metadata['total_chapters']}")
+            print(f"Estimated Total Chapters: {novel_metadata['total_chapters']}")
             print(f"URL: {novel_metadata['url']}")
         else:
             print("Failed to fetch novel metadata.")
@@ -552,29 +611,12 @@ def main():
         # Step 4: Navigate to the last chapter
         navigate_to_latest_chapter(selected_novel['url'], driver)
         
-        # Step 5: Find, scrape and save the chapter
-        # Scrape specific chapter
-        # chapter_num = 1
-        # if navigate_to_chapter(driver, chapter_num):
-        #     chapter_data = scrape_chapter(driver, 
-        #                                         args.website, 
-        #                                         novel_metadata['title'], 
-        #                                         chapter_num, 
-        #                                         save_dir = "novels")
-
-        # Scrape a range of chapters
-        # scrape_chapters_range(driver, 
-        #                         args.website, 
-        #                         novel_metadata, 
-        #                         1, 
-        #                         novel_metadata['total_chapters'], 
-        #                         save_dir = "novels")
-
-        # Scrape all chapters
-        scrape_all_chapters(driver, 
-                            args.website, 
-                            novel_metadata, 
-                            save_dir = "novels")
+        # Step 5: Find, scrape and save the chapter(s)
+        scrape_chapters(driver, 
+                        args.website, 
+                        novel_metadata, 
+                        chap_num=args.chapter_num, 
+                        save_dir=config["save_dir"])
 
     except Exception as e:
         print(f"Exception: {str(e)}")
