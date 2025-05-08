@@ -23,12 +23,15 @@ MAX_LENGTH = 1024  # Max token length for local models
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # Use GPU if available
 
 class LocalNovelSummarizer:
-    def __init__(self, novel_name, model_name="meta-llama/Meta-Llama-3.1-8B-Instruct", group_size=5):
+    def __init__(self, novel_name, 
+                 model_name="meta-llama/Meta-Llama-3.1-8B-Instruct", 
+                 group_size=5,
+                 summaries_dir = "summaries"):
         self.novel_name = novel_name
         self.novel_path = os.path.join(NOVEL_DIR, novel_name)
         self.group_size = group_size
-        # self.summaries_dir = os.path.join(self.novel_path, "summaries")
-        self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "summaries", novel_name)
+        # self.summaries_dir = os.path.join(self.novel_path, summaries_dir)
+        self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), summaries_dir, novel_name)
         self.model_name = model_name
         # self.max_new_tokens = 1024
         
@@ -677,8 +680,8 @@ def main():
     
     if not selected_chapters and not single_chapter and not args.chapters and not args.single_chapter:
         # Ask if the user wants to summarize specific chapters
-        summarize_all = input("\nDo you want to summarize all chapters? (y/n): ")
-        if summarize_all.lower() not in ["y", "yes"]:
+        summarize_all = input("\nDo you want to summarize all chapters? ([Y]/n): ")
+        if summarize_all.strip() != "" or summarize_all.lower() not in ["y", "yes"]:
             chapter_selection_type = input("Do you want to summarize (1) a single chapter or (2) multiple chapters? (1/2): ")
             
             if chapter_selection_type == "1":
@@ -702,10 +705,13 @@ def main():
         print("Summarizing all chapters")
     
     # Confirm before proceeding (models can be large)
-    confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? (y/n): ")
-    if confirm.lower() not in ["y", "yes"]:
+    confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? ([Y]/n): ")
+    if confirm.strip() != "" and confirm.lower() not in ["y", "yes"]:
         print("Operation cancelled.")
         return
+    # if confirm.lower() not in ["y", "yes"]:
+    #     print("Operation cancelled.")
+    #     return
     
     # Process the novel
     summarizer = LocalNovelSummarizer(selected_novel,
