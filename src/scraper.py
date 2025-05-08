@@ -385,7 +385,7 @@ def save_chapter_to_file(novel_name, chapter_num, title, content, save_dir = "no
         os.makedirs(novel_dir, exist_ok=True)
 
         # Create the file name
-        file_name = f"chapter_{chapter_num}.txt"
+        file_name = f"chapter_{chapter_num:04d}.txt"
         file_path = os.path.join(novel_dir, file_name)
 
         # Write the chapter content to the file
