@@ -600,11 +600,9 @@ def list_available_models():
     models = [
         ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Good balance of quality and resource usage with long context length"),
         ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Good balance of quality and resource usage"),
-        ("TheBloke/Llama-2-7B-Chat-GGML", "Llama 2 7B (GGML) - Optimized for CPU usage"),
-        ("meta-llama/Llama-3.2-3B-Instruct", "Llama 3.2 3.2B Instruct - Medium weight model"),
+        ("TinyLlama/TinyLlama_v1.1", "Tiny Llama v1.1 1B"),
         ("pszemraj/led-large-book-summary", "Booksum dataset 0.46B - Lightweight 16384"),
         ("facebook/bart-large-cnn", "BART CNN Dailymail 0.4B - Lightweight"),
-        ("Falconsai/text_summarization", "Finetuned T5 Small 0.06B - Very lightweight 1000"),
     ]
     return models
 
