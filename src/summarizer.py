@@ -598,11 +598,10 @@ def list_available_novels():
 def list_available_models():
     """List some popular lightweight models suitable for text summarization."""
     models = [
-        ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Good balance of quality and resource usage with long context length"),
-        ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Good balance of quality and resource usage"),
-        ("TinyLlama/TinyLlama_v1.1", "Tiny Llama v1.1 1B"),
-        ("pszemraj/led-large-book-summary", "Booksum dataset 0.46B - Lightweight 16384"),
-        ("facebook/bart-large-cnn", "BART CNN Dailymail 0.4B - Lightweight"),
+        ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Standard zie, upto 1M tokens"),
+        ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Standard size, 8k input tokens"),
+        ("microsoft/Phi-3.5-mini-instruct", " 3.8 billion-parameter, medium weight, 128k input tokens"),
+        ("pszemraj/led-large-book-summary", "Booksum dataset 0.46B - Lightweight 16384 tokens"),
     ]
     return models
 
