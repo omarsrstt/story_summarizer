@@ -577,7 +577,7 @@ def get_missing_args(args, config):
 
 def main():
     # Load config
-    config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "config.json"))
+    config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "scraper_config.json"))
     config = load_config(config_path)
     websites = config["websites"]
 
