@@ -16,15 +16,16 @@ import torch.nn.functional as F
 
 
 class LocalNovelSummarizer:
-    def __init__(self, novel_name, 
-                 model_name="meta-llama/Meta-Llama-3.1-8B-Instruct", 
-                 group_size=5,
-                 summaries_dir = "summaries"):
+    def __init__(self,
+                 novel_name: str, 
+                 model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct", 
+                 config: Dict = None
+                 ):
         self.novel_name = novel_name
-        self.novel_path = os.path.join(NOVEL_DIR, novel_name)
-        self.group_size = group_size
+        self.novel_path = os.path.join(config["NOVEL_DIR"], novel_name)
+        self.group_size = config["SUMMARY_GROUP_SIZE"]
         # self.summaries_dir = os.path.join(self.novel_path, summaries_dir)
-        self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), summaries_dir, novel_name)
+        self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["save_dir"], novel_name)
         self.model_name = model_name
         # self.max_new_tokens = 1024
         
@@ -35,7 +36,23 @@ class LocalNovelSummarizer:
         self._load_model_and_tokenizer()
         print("Model loaded successfully!")
     
-    
+    def get_total_chapters(self):
+        """Returns the highest chapter number found in the novel directory"""
+        chapter_files = glob(os.path.join(self.novel_path, 'chapter_*.txt'))
+        
+        if not chapter_files:
+            raise ValueError(f"No chapter files found in {self.novel_path}")
+        
+        # Extract numbers from all matching files
+        chapter_numbers = []
+        for filepath in chapter_files:
+            filename = os.path.basename(filepath)
+            match = re.match(r'chapter_(\d+)\.txt$', filename, re.IGNORECASE)
+            if match:
+                chapter_numbers.append(int(match.group(1)))
+        
+        return max(chapter_numbers) if chapter_numbers else 0
+
     def _load_model_and_tokenizer(self):
         """Load model with optimizations for faster inference."""
 
@@ -739,7 +756,6 @@ def main():
         group_size_input = input(f"Enter the number of chapters to group together (default: {config["SUMMARY_GROUP_SIZE"]}): ")
         group_size = int(group_size_input) if group_size_input.strip() else config["SUMMARY_GROUP_SIZE"]
     
-    
     # Confirm before proceeding (models can be large)
     confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? ([Y]/n): ")
     if confirm.strip() != "" and confirm.lower() not in ["y", "yes"]:
@@ -755,14 +771,14 @@ def main():
     
     # Initialize novel summarizer
     summarizer = LocalNovelSummarizer(selected_novel,
-                                      selected_model, 
-                                      group_size)
+                                      selected_model,
+                                      config)
     
     # Handle chapter selection
     selected_chapters = args.chapters
 
     # Get the max chapter number from the summarizer if needed for 'recent'
-    max_chapter = None
+    max_chapter = summarizer.get_total_chapters()
     if selected_chapters and selected_chapters.lower() == 'recent':
         max_chapter = summarizer.get_total_chapters()  # Implement this if needed
 
