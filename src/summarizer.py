@@ -578,13 +578,13 @@ class LocalNovelSummarizer:
         return overview
 
 
-def list_available_novels():
+def list_available_novels(novel_dir):
     """List all available novels in the novels directory."""
-    if not os.path.exists(NOVEL_DIR):
-        print(f"The directory '{NOVEL_DIR}' does not exist.")
+    if not os.path.exists(novel_dir):
+        print(f"The directory '{novel_dir}' does not exist.")
         return []
     
-    novels = [d for d in os.listdir(NOVEL_DIR) if os.path.isdir(os.path.join(NOVEL_DIR, d))]
+    novels = [d for d in os.listdir(novel_dir) if os.path.isdir(os.path.join(novel_dir, d))]
     return novels
 
 
@@ -687,7 +687,7 @@ def main():
     
     # List available novels
     print("Searching for novels ...")
-    novels = list_available_novels()
+    novels = list_available_novels(config["NOVEL_DIR"])
     
     if not novels:
         print("No novels found. Please place your novel in a directory under 'novels/'")
