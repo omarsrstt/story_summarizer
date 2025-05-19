@@ -14,13 +14,6 @@ from transformers import AutoConfig, BitsAndBytesConfig, AutoModelForCausalLM, A
 import torch
 import torch.nn.functional as F
 
-# Configuration
-SUMMARY_GROUP_SIZE = 5  # Number of chapters to summarize together
-BATCH_SIZE = 1
-NOVEL_DIR = "novels"  # Base directory for novels
-NOVEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), NOVEL_DIR)
-MAX_LENGTH = 1024  # Max token length for local models
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # Use GPU if available
 
 class LocalNovelSummarizer:
     def __init__(self, novel_name, 
@@ -598,24 +591,99 @@ def list_available_novels():
 def list_available_models():
     """List some popular lightweight models suitable for text summarization."""
     models = [
-        ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Standard zie, upto 1M tokens"),
+        ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Standard size, upto 1M tokens"),
         ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Standard size, 8k input tokens"),
-        ("microsoft/Phi-3.5-mini-instruct", " 3.8 billion-parameter, medium weight, 128k input tokens"),
+        ("microsoft/Phi-4-mini-instruct", " 3.84B, medium weight, 128k input tokens"),
         ("pszemraj/led-large-book-summary", "Booksum dataset 0.46B - Lightweight 16384 tokens"),
     ]
     return models
 
+def load_config(config_file):
+    """
+    Load website configurations from a JSON file.
+
+    Args:
+        config_file (str): Path to the JSON configuration file.
+
+    Returns:
+        dict: Configuration data.
+    """
+    with open(config_file, "r") as f:
+        config = json.load(f)
+    return config
+
+def parse_chapter_selection(chapter_str, max_chapter=None):
+    """
+    Parse chapter selection string into a list of chapter numbers.
+    Handles special cases like 'recent', 'all', single numbers, ranges, and comma-separated values.
+    
+    Args:
+        chapter_str (str): Chapter selection string (e.g., '1,3-5,8', 'recent', 'all')
+        max_chapter (int, optional): Maximum chapter number (needed for 'recent' handling)
+    
+    Returns:
+        list: List of chapter numbers to process, or None for all chapters
+    """
+    if not chapter_str or chapter_str.lower() == 'all':
+        return None  # None means process all chapters
+    
+    if chapter_str.lower() == 'recent':
+        if max_chapter is None:
+            raise ValueError("Max chapter must be provided for 'recent' selection")
+        return [max_chapter]
+    
+    try:
+        # Process numeric selections
+        chapters = set()
+        parts = [p.strip() for p in chapter_str.split(',') if p.strip()]
+        
+        for part in parts:
+            if '-' in part:
+                # Handle ranges like 1-5
+                start, end = map(int, part.split('-'))
+                chapters.update(range(start, end + 1))
+            else:
+                # Handle single numbers
+                chapters.add(int(part))
+        
+        return sorted(chapters) if chapters else None
+    
+    except ValueError:
+        raise ValueError(f"Invalid chapter selection format: {chapter_str}")
+
+def parse_arguments(config):
+    """
+    Parse command-line arguments for the scraper.
+
+    Args:
+        websites (list): A list of dictionaries containing website configurations.
+
+    Returns:
+        argparse.Namespace: Parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Generate summaries for novel chapters using local models")
+    parser.add_argument("-m", "--model", type=str, default=config["model"], help="Model to use for summarization")
+    parser.add_argument("-n", "--novel", type=str, default=config["novel"], help="Name of the novel to summarize")
+    parser.add_argument("-gs", "--group-size", type=int, default=config["SUMMARY_GROUP_SIZE"], 
+                        help="Number of chapters to group together")
+    parser.add_argument("-bs", "--batch-size", type=int, default=config["BATCH_SIZE"],
+                       help="Batch size for chunk processing (GPU optimization)")
+    parser.add_argument("-c", "--chapters", type=str, default=config["chapters"], 
+                        help="Specific chapters to summarize (e.g., '1,3-5,7')")
+    parser.add_argument('-no', '--novel_overview', action='store_true')
+    return parser.parse_args()
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate summaries for novel chapters using local models")
-    parser.add_argument("--model", type=str, help="Model to use for summarization")
-    parser.add_argument("--novel", type=str, help="Name of the novel to summarize")
-    parser.add_argument("--group-size", type=int, default=SUMMARY_GROUP_SIZE, help="Number of chapters to group together")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                       help="Batch size for chunk processing (GPU optimization)")
-    parser.add_argument("--chapters", type=str, help="Specific chapters to summarize (e.g., '1,3-5,7')")
-    parser.add_argument("--single-chapter", type=int, help="Summarize a single specific chapter")
-    args = parser.parse_args()
+    # Load config
+    config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "summarizer_config.json"))
+    config = load_config(config_path)
+
+    # Get input args
+    args = parse_arguments(config)
+
+    # Set up some important variables
+    config["NOVEL_DIR"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["NOVEL_DIR"]),
+    config["DEVICE"] = "cuda" if torch.cuda.is_available() else "cpu"  # Use GPU if available,
     
     # List available novels
     print("Searching for novels ...")
@@ -636,8 +704,8 @@ def main():
         try:
             idx = int(selection) - 1
             selected_novel = novels[idx]
-        except (ValueError, IndexError):
-            print("Invalid selection. Exiting.")
+        except (ValueError, IndexError) as e:
+            print(f"Invalid selection: {e}\n. Exiting.")
             return
     elif selected_novel not in novels:
         print(f"Novel '{selected_novel}' not found. Available novels: {', '.join(novels)}")
@@ -668,38 +736,9 @@ def main():
     # Get group size
     group_size = args.group_size
     if not args.group_size:
-        group_size_input = input(f"Enter the number of chapters to group together (default: {SUMMARY_GROUP_SIZE}): ")
-        group_size = int(group_size_input) if group_size_input.strip() else SUMMARY_GROUP_SIZE
+        group_size_input = input(f"Enter the number of chapters to group together (default: {config["SUMMARY_GROUP_SIZE"]}): ")
+        group_size = int(group_size_input) if group_size_input.strip() else config["SUMMARY_GROUP_SIZE"]
     
-    # Handle chapter selection
-    selected_chapters = args.chapters
-    single_chapter = args.single_chapter
-    
-    if not selected_chapters and not single_chapter and not args.chapters and not args.single_chapter:
-        # Ask if the user wants to summarize specific chapters
-        summarize_all = input("\nDo you want to summarize all chapters? ([Y]/n): ")
-        if summarize_all.strip() != "" or summarize_all.lower() not in ["y", "yes"]:
-            chapter_selection_type = input("Do you want to summarize (1) a single chapter or (2) multiple chapters? (1/2): ")
-            
-            if chapter_selection_type == "1":
-                single_chapter_input = input("Enter the chapter number to summarize: ")
-                try:
-                    single_chapter = int(single_chapter_input)
-                except ValueError:
-                    print("Invalid chapter number. Will summarize all chapters.")
-            elif chapter_selection_type == "2":
-                selected_chapters = input("Enter chapter numbers or ranges (e.g., '1,3-5,7'): ")
-    
-    print(f"\nProcessing novel: {selected_novel}")
-    print(f"Using model: {selected_model}")
-    print(f"Group size: {group_size}")
-
-    if single_chapter:
-        print(f"Summarizing single chapter: {single_chapter}")
-    elif selected_chapters:
-        print(f"Summarizing selected chapters: {selected_chapters}")
-    else:
-        print("Summarizing all chapters")
     
     # Confirm before proceeding (models can be large)
     confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? ([Y]/n): ")
@@ -710,26 +749,44 @@ def main():
     #     print("Operation cancelled.")
     #     return
     
-    # Process the novel
+    print(f"\nProcessing novel: {selected_novel}")
+    print(f"Using model: {selected_model}")
+    print(f"Group size: {group_size}")
+    
+    # Initialize novel summarizer
     summarizer = LocalNovelSummarizer(selected_novel,
                                       selected_model, 
                                       group_size)
+    
+    # Handle chapter selection
+    selected_chapters = args.chapters
+
+    # Get the max chapter number from the summarizer if needed for 'recent'
+    max_chapter = None
+    if selected_chapters and selected_chapters.lower() == 'recent':
+        max_chapter = summarizer.get_total_chapters()  # Implement this if needed
+
+    # Parse chapter selection
+    selected_chapters = parse_chapter_selection(selected_chapters, max_chapter)
+    print(f"Summarizing selected chapters: {selected_chapters}")
+
+    # Process the chapter summaries
     all_summaries = summarizer.generate_all_summaries()
     
     # Process the novel
-    if single_chapter:
+    if selected_chapters and len(selected_chapters) == 1:
         # Summarize just one chapter
-        print(f"\nSummarizing chapter {single_chapter}...")
-        summary = summarizer.summarize_specific_chapter(single_chapter)
+        print(f"\nSummarizing chapter {selected_chapters[0]}...")
+        summary = summarizer.summarize_specific_chapter(selected_chapters[0])
         if summary:
-            print(f"\nSummary for chapter {single_chapter} created successfully!")
+            print(f"\nSummary for chapter {selected_chapters[0]} created successfully!")
         else:
-            print(f"\nFailed to summarize chapter {single_chapter}.")
+            print(f"\nFailed to summarize chapter {selected_chapters[0]}.")
     else:
         # Summarize multiple chapters or all chapters
         all_summaries = summarizer.generate_all_summaries(selected_chapters)
         
-        if all_summaries:
+        if all_summaries and args.novel_overview:
             # Only generate overview if we're summarizing all chapters or a substantial portion
             if not selected_chapters or len(all_summaries) > 3:
                 print("\nGenerating overall novel summary...")
