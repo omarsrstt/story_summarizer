@@ -10,7 +10,7 @@ from typing import List, Tuple, Dict
 from tqdm import tqdm
 
 # For local model inference
-from transformers import AutoConfig, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 import torch.nn.functional as F
 
@@ -27,6 +27,7 @@ class LocalNovelSummarizer:
         # self.summaries_dir = os.path.join(self.novel_path, summaries_dir)
         self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["save_dir"], novel_name)
         self.model_name = model_name
+        self.config = config
         # self.max_new_tokens = 1024
         
         # Create summaries directory if it doesn't exist
@@ -56,34 +57,40 @@ class LocalNovelSummarizer:
     def _load_model_and_tokenizer(self):
         """Load model with optimizations for faster inference."""
 
-        # # No quantization
-        # quantization_config = None
-
-        # # Optimize for 8-bit quantization to reduce memory usage
-        # quantization_config = BitsAndBytesConfig(
-        #     load_in_8bit=True,
-        #     llm_int8_threshold=6.0,
-        #     llm_int8_enable_fp32_cpu_offload=True
-        # )
-
-        # Optimize for 8-bit quantization to reduce memory usage
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,  # Enable 4-bit quantization
-            bnb_4bit_use_double_quant=True,  # Optional: Further memory savings
-            bnb_4bit_quant_type="nf4",  # Use 4-bit NormalFloat quantization
-            bnb_4bit_compute_dtype=torch.float16  # Compute dtype for 4-bit
-        )
-
+        quantization_info = self.config["model_config"][self.model_name]["quantization"]
+        if quantization_info["type"]:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit = quantization_info["load_in_4bit"],  # Enable 4-bit quantization
+                bnb_4bit_use_double_quant = quantization_info["bnb_4bit_use_double_quant"],  # Optional: Further memory savings
+                bnb_4bit_quant_type = quantization_info["bnb_4bit_quant_type"],  # Use 4-bit NormalFloat quantization
+                bnb_4bit_compute_dtype = quantization_info["bnb_4bit_compute_dtype"] # Compute dtype for 4-bit
+            )
+        else: # No quantization
+            quantization_config = None
+        
         config = AutoConfig.from_pretrained(self.model_name,
-                                            use_sdpa=False)
+                                            # use_sdpa=False
+                                            )
+        # Initialize model
+        if self.config["model_config"][self.model_name]["type"] == "seq2seq":
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.model_name,
+                # torch_dtype=torch.bfloat16,  # Use half precision
+                device_map="auto",
+                config=config,
+                quantization_config=quantization_config,
+                trust_remote_code=True
+                )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16,  # Use half precision
-            device_map="auto",
-            config=config,
-            quantization_config=quantization_config,
-            trust_remote_code=True)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.bfloat16,  # Use half precision
+                device_map="auto",
+                config=config,
+                quantization_config=quantization_config,
+                trust_remote_code=True
+                )
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         # Set padding token if needed
@@ -778,7 +785,7 @@ def main():
     selected_chapters = args.chapters
 
     # Get the max chapter number from the summarizer if needed for 'recent'
-    max_chapter = summarizer.get_total_chapters()
+    max_chapter = None
     if selected_chapters and selected_chapters.lower() == 'recent':
         max_chapter = summarizer.get_total_chapters()  # Implement this if needed
 
