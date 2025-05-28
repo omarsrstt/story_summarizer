@@ -756,7 +756,7 @@ def main():
     # Get group size
     group_size = args.group_size
     if not args.group_size:
-        group_size_input = input(f"Enter the number of chapters to group together (default: {config["CHAPTER_GROUP_SIZE"]}): ")
+        group_size_input = input(f"Enter the number of chapters to group together (default: {config['CHAPTER_GROUP_SIZE']}): ")
         group_size = int(group_size_input) if group_size_input.strip() else config["CHAPTER_GROUP_SIZE"]
     
     # Confirm before proceeding (models can be large)
