@@ -702,7 +702,7 @@ def main():
     args = parse_arguments(config)
 
     # Set up some important variables
-    config["NOVEL_DIR"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["NOVEL_DIR"]),
+    config["NOVEL_DIR"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["NOVEL_DIR"])
     config["DEVICE"] = "cuda" if torch.cuda.is_available() else "cpu"  # Use GPU if available,
     
     # List available novels
