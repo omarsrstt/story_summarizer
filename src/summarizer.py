@@ -127,7 +127,7 @@ class LocalNovelSummarizer:
             groups.append(group)
         return groups
     
-    def _generate_text(self, prompt, max_new_tokens=1024, progress_bar=None):
+    def _generate_text(self, prompt, max_new_tokens=512, progress_bar=None):
         """Direct text generation with optimized settings."""
         # Pre-process prompt
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -137,19 +137,21 @@ class LocalNovelSummarizer:
             # Record start time
             start_time = time.time()
             
+            generation_config = self.config["model_config"][self.model_name]["generation"]
             # Generate with optimized parameters
-            outputs = self.model.generate(
-                inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                max_new_tokens=max_new_tokens,
-                temperature=0.3,
-                top_p=0.95,
-                top_k=40,
-                repetition_penalty=1.1,
-                do_sample=True,
-                num_beams=1,  # Greedy decoding for speed
-                # pad_token_id=self.tokenizer.eos_token_id,
-            )
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs["input_ids"],
+                    attention_mask = inputs["attention_mask"],
+                    max_new_tokens = generation_config["max_new_tokens"] if "max_new_tokens" in generation_config else max_new_tokens,
+                    temperature = generation_config["temperature"] if "temperature" in generation_config else 1.0,
+                    top_p = generation_config["top_p"] if "top_p" in generation_config else 1.0,
+                    top_k = generation_config["top_k"] if "top_k" in generation_config else 50,
+                    repetition_penalty = generation_config["repetition_penalty"] if "repetition_penalty" in generation_config else 1.0,
+                    do_sample = generation_config["do_sample"] if "do_sample" in generation_config else False,
+                    num_beams = generation_config["num_beams"] if "num_beams" in generation_config else 1,
+                    pad_token_id = self.tokenizer.pad_token,
+                )
             
             # Calculate time
             elapsed = time.time() - start_time
@@ -171,7 +173,7 @@ class LocalNovelSummarizer:
         
         return result
     
-    def _batch_process_chunks(self, chunks, chapter_range, batch_size=2):
+    def _batch_process_chunks(self, chunks, chapter_range, batch_size=2, max_new_tokens=1024):
         """Process multiple chunks in batches to better utilize GPU."""
         # This is an optimization for GPU utilization
         # Instead of processing one chunk at a time sequentially,
@@ -204,16 +206,18 @@ class LocalNovelSummarizer:
             inputs = self.tokenizer(batch_prompts, return_tensors="pt", padding=True).to(self.device)
             
             # Generate summaries for the batch
+            generation_config = self.config["model_config"][self.model_name]["generation"]
             with torch.no_grad():
                 outputs = self.model.generate(
                     inputs["input_ids"],
-                    max_new_tokens=self.max_new_tokens,
-                    temperature=0.3,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    do_sample=True,
-                    num_beams=1,
-                    pad_token_id=self.tokenizer.eos_token_id,
+                    max_new_tokens = generation_config["max_new_tokens"] if "max_new_tokens" in generation_config else max_new_tokens,
+                    temperature = generation_config["temperature"] if "temperature" in generation_config else 1.0,
+                    top_p = generation_config["top_p"] if "top_p" in generation_config else 1.0,
+                    top_k = generation_config["top_k"] if "top_k" in generation_config else 50,
+                    repetition_penalty = generation_config["repetition_penalty"] if "repetition_penalty" in generation_config else 1.0,
+                    do_sample = generation_config["do_sample"] if "do_sample" in generation_config else False,
+                    num_beams = generation_config["num_beams"] if "num_beams" in generation_config else 1,
+                    pad_token_id=self.tokenizer.pad_token,
                 )
             
             # Process each output
@@ -794,7 +798,7 @@ def main():
     print(f"Summarizing selected chapters: {selected_chapters}")
 
     # Process the chapter summaries
-    all_summaries = summarizer.generate_all_summaries()
+    # all_summaries = summarizer.generate_all_summaries()
     
     # Process the novel
     if selected_chapters and len(selected_chapters) == 1:
