@@ -23,7 +23,7 @@ class LocalNovelSummarizer:
                  ):
         self.novel_name = novel_name
         self.novel_path = os.path.join(config["NOVEL_DIR"], novel_name)
-        self.group_size = config["SUMMARY_GROUP_SIZE"]
+        self.group_size = config["CHAPTER_GROUP_SIZE"]
         # self.summaries_dir = os.path.join(self.novel_path, summaries_dir)
         self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["save_dir"], novel_name)
         self.model_name = model_name
@@ -36,6 +36,8 @@ class LocalNovelSummarizer:
         # Initialize model
         self._load_model_and_tokenizer()
         print("Model loaded successfully!")
+
+        self.chapter_dict = self.get_sorted_chapters()
     
     def get_total_chapters(self):
         """Returns the highest chapter number found in the novel directory"""
@@ -112,7 +114,7 @@ class LocalNovelSummarizer:
         """Get all chapter files sorted by chapter number."""
         chapter_files = glob.glob(os.path.join(self.novel_path, "*.txt"))
         chapters = [(self.extract_chapter_number(f), f) for f in chapter_files]
-        return sorted(chapters)
+        return dict(sorted(chapters))
     
     def read_chapter(self, chapter_file):
         """Read content of a chapter file."""
@@ -130,7 +132,7 @@ class LocalNovelSummarizer:
     def _generate_text(self, prompt, max_new_tokens=512, progress_bar=None):
         """Direct text generation with optimized settings."""
         # Pre-process prompt
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
         
         # Set generation parameters for speed
         with torch.no_grad():
@@ -265,18 +267,19 @@ class LocalNovelSummarizer:
     
     def generate_summary_for_chunk(self, chunk, chapter_range, progress_bar=None):
         """Generate summary for a specific text chunk."""
-        prompt = f"""
-        <task>
-        Summarize the following excerpt from {chapter_range} of the novel "{self.novel_name}".
-        Focus on main plot points, character developments, and important events.
-        </task>
+        
+        prompt_template = self.config["model_config"][self.model_name].get("prompt_template")
+        if prompt_template:
+            prompt = prompt_template.format(chapter=chunk)
+        else:
+            # Use default prompt
+            prompt = f"""
+            Summarize the following excerpt from {chapter_range} of the novel "{self.novel_name}".
+            Focus on main plot points, character developments, and important events.
 
-        <text>
-        {chunk}
-        </text>
-
-        <summary>
-        """
+            
+            {chunk}
+            """
         
         summary = self._generate_text(prompt, progress_bar=progress_bar)
         return summary
@@ -290,7 +293,8 @@ class LocalNovelSummarizer:
             chapter_range = f"Chapters {chapter_numbers[0]}-{chapter_numbers[-1]}"
         
         # Chunk the content
-        chunks = self.chunk_text(chapters_content)
+        chunks = self.chunk_text(chapters_content, 
+                                 max_tokens=self.config["model_config"][self.model_name]["chunk_size"])
         
         with tqdm(total=len(chunks), desc=f"Processing chunks for {chapter_range}") as chunk_bar:
             if len(chunks) == 1:
@@ -302,7 +306,7 @@ class LocalNovelSummarizer:
             # Check if we should use batched processing (GPU optimization)
             if self.device == "cuda" and len(chunks) > 1:
                 # Process chunks in batches for better GPU utilization
-                batch_size = min(2, len(chunks))  # Adjust batch size based on GPU memory
+                batch_size = min(self.config["BATCH_SIZE"], len(chunks))  # Adjust batch size based on GPU memory
                 chunk_bar.set_description(f"Batch processing chunks for {chapter_range}")
                 
                 # Use batched processing with smaller batches to avoid memory issues
@@ -397,31 +401,27 @@ class LocalNovelSummarizer:
         
         return sorted(list(chapter_numbers))
     
-    def generate_all_summaries(self, selected_chapters=None):
+    def generate_all_summaries(self, chapter_numbers=None):
         """Generate summaries for all chapter groups."""
-        # Get sorted chapters
-        with tqdm(total=1, desc="Finding and sorting chapters") as sort_bar:
-            sorted_chapters = self.get_sorted_chapters()
-            sort_bar.update(1)
             
-        if not sorted_chapters:
+        if not self.chapter_dict:
             print(f"No chapters found for novel '{self.novel_name}'")
             return
         
-        # Parse selected chapters if provided
-        chapter_numbers = None
-        if selected_chapters:
-            chapter_numbers = self.parse_chapter_selection(selected_chapters)
-            if chapter_numbers:
-                print(f"Selected chapters: {chapter_numbers}")
-                sorted_chapters = self.filter_chapters_by_numbers(sorted_chapters, chapter_numbers)
-                
-                if not sorted_chapters:
-                    print(f"No matching chapters found for selection: {selected_chapters}")
-                    return
+        # Get chapters as list of (num, path) tuples
+        chapters = list(self.chapter_dict.items())
+        
+        # Match selected chapters with those found locally
+        if chapter_numbers:
+            print(f"Selected chapters: {chapter_numbers}")
+            chapters = [(num, path) for num, path in chapters if num in chapter_numbers]
+            
+            if not chapters:
+                print(f"No matching chapters found for selection: {chapter_numbers}")
+                return
 
         # Group chapters
-        chapter_groups = self.group_chapters(sorted_chapters)
+        chapter_groups = self.group_chapters(chapters)
         
         # Generate summaries for each group
         all_summaries = {}
@@ -458,27 +458,27 @@ class LocalNovelSummarizer:
                 
                 group_bar.update(1)
         
-        # Create a master summary file with all summaries
-        with tqdm(total=1, desc="Creating master summary files") as master_bar:
-            # Create a suffix for the filename if we're doing selected chapters
-            file_suffix = ""
-            if selected_chapters:
-                file_suffix = "_selected"
+        # # Create a master summary file with all summaries
+        # with tqdm(total=1, desc="Creating master summary files") as master_bar:
+        #     # Create a suffix for the filename if we're doing selected chapters
+        #     file_suffix = ""
+        #     if chapter_numbers:
+        #         file_suffix = "_selected"
             
-            master_summary_path = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.txt")
-            with open(master_summary_path, 'w', encoding='utf-8') as f:
-                for chapter_range, summary in all_summaries.items():
-                    f.write(f"SUMMARY FOR CHAPTERS {chapter_range}\n")
-                    f.write("=" * 80 + "\n\n")
-                    f.write(summary)
-                    f.write("\n\n" + "=" * 80 + "\n\n")
+        #     master_summary_path = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.txt")
+        #     with open(master_summary_path, 'w', encoding='utf-8') as f:
+        #         for chapter_range, summary in all_summaries.items():
+        #             f.write(f"SUMMARY FOR CHAPTERS {chapter_range}\n")
+        #             f.write("=" * 80 + "\n\n")
+        #             f.write(summary)
+        #             f.write("\n\n" + "=" * 80 + "\n\n")
             
-            # Also save as JSON for programmatic access
-            master_summary_json = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.json")
-            with open(master_summary_json, 'w', encoding='utf-8') as f:
-                json.dump(all_summaries, f, indent=2)
+        #     # Also save as JSON for programmatic access
+        #     master_summary_json = os.path.join(self.summaries_dir, f"master_summary{file_suffix}.json")
+        #     with open(master_summary_json, 'w', encoding='utf-8') as f:
+        #         json.dump(all_summaries, f, indent=2)
             
-            master_bar.update(1)
+        #     master_bar.update(1)
             
         return all_summaries
     
@@ -492,15 +492,8 @@ class LocalNovelSummarizer:
                 print(f"Invalid chapter number: {chapter_number}")
                 return None
         
-        # Get all chapters
-        sorted_chapters = self.get_sorted_chapters()
-        
         # Find the specific chapter
-        chapter_file = None
-        for num, file in sorted_chapters:
-            if num == chapter_number:
-                chapter_file = file
-                break
+        chapter_file = self.chapter_dict.get(chapter_number)
         
         if not chapter_file:
             print(f"Chapter {chapter_number} not found")
@@ -615,7 +608,6 @@ def list_available_novels(novel_dir):
     novels = [d for d in os.listdir(novel_dir) if os.path.isdir(os.path.join(novel_dir, d))]
     return novels
 
-
 def list_available_models():
     """List some popular lightweight models suitable for text summarization."""
     models = [
@@ -692,7 +684,7 @@ def parse_arguments(config):
     parser = argparse.ArgumentParser(description="Generate summaries for novel chapters using local models")
     parser.add_argument("-m", "--model", type=str, default=config["model"], help="Model to use for summarization")
     parser.add_argument("-n", "--novel", type=str, default=config["novel"], help="Name of the novel to summarize")
-    parser.add_argument("-gs", "--group-size", type=int, default=config["SUMMARY_GROUP_SIZE"], 
+    parser.add_argument("-gs", "--group-size", type=int, default=config["CHAPTER_GROUP_SIZE"], 
                         help="Number of chapters to group together")
     parser.add_argument("-bs", "--batch-size", type=int, default=config["BATCH_SIZE"],
                        help="Batch size for chunk processing (GPU optimization)")
@@ -764,8 +756,8 @@ def main():
     # Get group size
     group_size = args.group_size
     if not args.group_size:
-        group_size_input = input(f"Enter the number of chapters to group together (default: {config["SUMMARY_GROUP_SIZE"]}): ")
-        group_size = int(group_size_input) if group_size_input.strip() else config["SUMMARY_GROUP_SIZE"]
+        group_size_input = input(f"Enter the number of chapters to group together (default: {config["CHAPTER_GROUP_SIZE"]}): ")
+        group_size = int(group_size_input) if group_size_input.strip() else config["CHAPTER_GROUP_SIZE"]
     
     # Confirm before proceeding (models can be large)
     confirm = input("\nThis will download the model if not already present, which may use significant disk space. Continue? ([Y]/n): ")
@@ -815,7 +807,7 @@ def main():
         
         if all_summaries and args.novel_overview:
             # Only generate overview if we're summarizing all chapters or a substantial portion
-            if not selected_chapters or len(all_summaries) > 3:
+            if selected_chapters or len(all_summaries) > 3:
                 print("\nGenerating overall novel summary...")
                 summarizer.generate_novel_overview(all_summaries)
         
