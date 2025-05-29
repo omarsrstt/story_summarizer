@@ -530,7 +530,7 @@ def parse_arguments(websites):
     """
     parser = argparse.ArgumentParser(description="Scrape light novel chapters from multiple websites.")
     parser.add_argument(
-        "--website",
+        "--website", "-w",
         choices=[w["name"] for w in websites],
         required=False,
         default=None,
@@ -538,14 +538,14 @@ def parse_arguments(websites):
         type=str,
     )
     parser.add_argument(
-        "--novel",
+        "--novel", "-n",
         required=False,
         default=None,
         help="Novel slug/name",
         type=str,
     )
     parser.add_argument(
-        "--chapter_num",
+        "--chapter_num", "-c",
         type=int,
         required=False,
         default=None,
