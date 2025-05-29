@@ -15,7 +15,6 @@ def focus_window(driver):
     driver.minimize_window()
     driver.maximize_window()
 
-
 def search_novels(query, website, driver):
     """Search for novels by name using Selenium and return matching results"""
     try:
@@ -499,9 +498,10 @@ def is_chapter_content_visible(driver, chapter_num):
 
 def setup_driver():
     options = uc.ChromeOptions()
-    driver = uc.Chrome(options=options)
+    options.add_argument('--auto-update')
+    driver = uc.Chrome(options=options,
+                       use_subprocess=True)
     return driver
-
 
 def load_config(config_file):
     """
@@ -516,7 +516,6 @@ def load_config(config_file):
     with open(config_file, "r") as f:
         config = json.load(f)
     return config
-
 
 def parse_arguments(websites):
     """
@@ -546,7 +545,7 @@ def parse_arguments(websites):
     )
     parser.add_argument(
         "--chapter_num", "-c",
-        type=int,
+        type=str,
         required=False,
         default=None,
         help="Chapter number",
