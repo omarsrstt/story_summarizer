@@ -1,0 +1,38 @@
+[project]
+name = "story-summarizer"
+version = "0.1.0"
+description = "Scrape light-novel chapters and summarize them with local LLMs."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+
+# Core: needed to run the summarizer (src/summarizer.py)
+dependencies = [
+    "torch",
+    "transformers>=4.51",
+    "accelerate",
+    "bitsandbytes>=0.45",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# Needed to run the scraper (src/scraper.py)
+scraper = [
+    "selenium",
+    "undetected-chromedriver",
+    "beautifulsoup4",
+    "tabulate",
+    "webdriver-manager",
+]
+# Needed to run the web API (src/web_api.py)
+web = [
+    "flask",
+]
+
+# PyPI's Windows torch wheel is CPU-only, so bind torch to PyTorch's CUDA index.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }

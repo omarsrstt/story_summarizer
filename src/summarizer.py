@@ -65,7 +65,7 @@ class LocalNovelSummarizer:
                 load_in_4bit = quantization_info["load_in_4bit"],  # Enable 4-bit quantization
                 bnb_4bit_use_double_quant = quantization_info["bnb_4bit_use_double_quant"],  # Optional: Further memory savings
                 bnb_4bit_quant_type = quantization_info["bnb_4bit_quant_type"],  # Use 4-bit NormalFloat quantization
-                bnb_4bit_compute_dtype = quantization_info["bnb_4bit_compute_dtype"] # Compute dtype for 4-bit
+                bnb_4bit_compute_dtype = get_torch_dtype(quantization_info["bnb_4bit_compute_dtype"]) # Compute dtype for 4-bit
             )
         else: # No quantization
             quantization_config = None
@@ -77,21 +77,20 @@ class LocalNovelSummarizer:
         if self.config["model_config"][self.model_name]["type"] == "seq2seq":
             self.model = AutoModelForSeq2SeqLM.from_pretrained(
                 self.model_name,
-                # torch_dtype=torch.bfloat16,  # Use half precision
-                device_map="auto",
-                config=config,
-                quantization_config=quantization_config,
-                trust_remote_code=True
+                device_map = self.config["DEVICE"],
+                config = config,
+                quantization_config = quantization_config,
+                trust_remote_code = True
                 )
 
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.bfloat16,  # Use half precision
-                device_map="auto",
-                config=config,
-                quantization_config=quantization_config,
-                trust_remote_code=True
+                torch_dtype = torch.bfloat16,  # Use half precision
+                device_map = self.config["DEVICE"],
+                config = config,
+                quantization_config = quantization_config,
+                trust_remote_code = True
                 )
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -102,6 +101,16 @@ class LocalNovelSummarizer:
         # Move to CUDA if available
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {self.device}")
+
+    def _uses_chat_template(self):
+        """Whether the selected model's config opts into chat templating.
+
+        Instruction-tuned chat models (e.g. Qwen3-Instruct) follow a system
+        prompt far better when it is delivered through their chat template than
+        as a raw completion. This is opt-in per model config entry so that
+        existing completion-style entries keep working exactly as before.
+        """
+        return bool(self.config["model_config"][self.model_name].get("chat_template"))
 
     def extract_chapter_number(self, filename):
         """Extract chapter number from filename."""
@@ -129,10 +138,29 @@ class LocalNovelSummarizer:
             groups.append(group)
         return groups
     
-    def _generate_text(self, prompt, max_new_tokens=512, progress_bar=None):
-        """Direct text generation with optimized settings."""
+    def _generate_text(self, prompt, max_new_tokens=512, progress_bar=None, system_prompt=None):
+        """Direct text generation with optimized settings.
+
+        If the configured model opts into chat templating (``chat_template`` in
+        its config entry), ``prompt`` is delivered as a user turn -- preceded by
+        ``system_prompt`` when given -- through the model's chat template. Every
+        other model keeps the original raw-completion behaviour unchanged.
+        """
         # Pre-process prompt
-        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
+        if self._uses_chat_template():
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            inputs = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).to(self.device)
+        else:
+            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
         
         # Set generation parameters for speed
         with torch.no_grad():
@@ -152,7 +180,7 @@ class LocalNovelSummarizer:
                     repetition_penalty = generation_config["repetition_penalty"] if "repetition_penalty" in generation_config else 1.0,
                     do_sample = generation_config["do_sample"] if "do_sample" in generation_config else False,
                     num_beams = generation_config["num_beams"] if "num_beams" in generation_config else 1,
-                    pad_token_id = self.tokenizer.pad_token,
+                    pad_token_id = self.tokenizer.pad_token_id,
                 )
             
             # Calculate time
@@ -167,11 +195,16 @@ class LocalNovelSummarizer:
                 print(f"Generated {output_tokens} tokens in {elapsed:.2f}s ({tokens_per_second:.2f} tokens/s)")
         
         # Extract generated text
-        result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Remove the prompt from result
-        prompt_decoded = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
-        result = result.replace(prompt_decoded, "", 1).strip()
+        if self._uses_chat_template():
+            # Decode only the newly generated tokens: the templated prompt is
+            # wrapped in chat special tokens that a plain string replace of the
+            # decoded prompt would not cleanly remove.
+            result = self.tokenizer.decode(outputs[0][input_tokens:], skip_special_tokens=True).strip()
+        else:
+            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Remove the prompt from result
+            prompt_decoded = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
+            result = result.replace(prompt_decoded, "", 1).strip()
         
         return result
     
@@ -219,7 +252,7 @@ class LocalNovelSummarizer:
                     repetition_penalty = generation_config["repetition_penalty"] if "repetition_penalty" in generation_config else 1.0,
                     do_sample = generation_config["do_sample"] if "do_sample" in generation_config else False,
                     num_beams = generation_config["num_beams"] if "num_beams" in generation_config else 1,
-                    pad_token_id=self.tokenizer.pad_token,
+                    pad_token_id = self.tokenizer.pad_token_id,
                 )
             
             # Process each output
@@ -270,7 +303,10 @@ class LocalNovelSummarizer:
         
         prompt_template = self.config["model_config"][self.model_name].get("prompt_template")
         if prompt_template:
-            prompt = prompt_template.format(chapter=chunk)
+            # {chapter_range}/{novel} are optional placeholders for templates
+            # that state the source up front (matching the prompt the spike
+            # validated); {chapter} remains the excerpt as before.
+            prompt = prompt_template.format(chapter=chunk, chapter_range=chapter_range, novel=self.novel_name)
         else:
             # Use default prompt
             prompt = f"""
@@ -281,7 +317,8 @@ class LocalNovelSummarizer:
             {chunk}
             """
         
-        summary = self._generate_text(prompt, progress_bar=progress_bar)
+        system_prompt = self.config["model_config"][self.model_name].get("system_prompt")
+        summary = self._generate_text(prompt, progress_bar=progress_bar, system_prompt=system_prompt)
         return summary
     
     def generate_summary(self, chapters_content, chapter_numbers):
@@ -329,7 +366,18 @@ class LocalNovelSummarizer:
         
         # Create a meta-summary of all chunk summaries
         with tqdm(total=1, desc=f"Creating meta-summary for {chapter_range}") as meta_bar:
-            meta_prompt = f"""
+            # The merge step is config-driven so that a model with fidelity
+            # rules does not silently lose them here (the default text below
+            # asks for a "cohesive summary" and would happily editorialize).
+            meta_prompt_template = self.config["model_config"][self.model_name].get("meta_prompt_template")
+            if meta_prompt_template:
+                meta_prompt = meta_prompt_template.format(
+                    chapter_range=chapter_range,
+                    novel=self.novel_name,
+                    summaries=combined_chunk_summaries,
+                )
+            else:
+                meta_prompt = f"""
                 <task>
                 Create a cohesive summary of {chapter_range} from the novel "{self.novel_name}" based on these partial summaries.
                 Provide a unified summary that captures the main events and character developments.
@@ -341,8 +389,9 @@ class LocalNovelSummarizer:
 
                 <unified_summary>
                 """
-            
-            meta_summary = self._generate_text(meta_prompt, progress_bar=meta_bar)
+
+            system_prompt = self.config["model_config"][self.model_name].get("system_prompt")
+            meta_summary = self._generate_text(meta_prompt, progress_bar=meta_bar, system_prompt=system_prompt)
             meta_bar.update(1)
             
         return meta_summary
@@ -598,6 +647,14 @@ class LocalNovelSummarizer:
             
         return overview
 
+def get_torch_dtype(dtype_str):
+    dtype_map = {
+        'float16': torch.float16,
+        'bfloat16': torch.bfloat16,
+        'float32': torch.float32,
+        'auto': 'auto'
+    }
+    return dtype_map.get(dtype_str.lower(), torch.float16)
 
 def list_available_novels(novel_dir):
     """List all available novels in the novels directory."""
@@ -611,6 +668,7 @@ def list_available_novels(novel_dir):
 def list_available_models():
     """List some popular lightweight models suitable for text summarization."""
     models = [
+        ("Qwen/Qwen3-4B-Instruct-2507", "Qwen3 4B Instruct - 4-bit, 256k context, fits 8GB VRAM"),
         ("Qwen/Qwen2.5-7B-Instruct-1M", "Qwen 2.5 7B Instruct - Standard size, upto 1M tokens"),
         ("meta-llama/Meta-Llama-3.1-8B-Instruct", "Llama 3.1 8B Instruct - Standard size, 8k input tokens"),
         ("microsoft/Phi-4-mini-instruct", " 3.84B, medium weight, 128k input tokens"),
@@ -770,7 +828,7 @@ def main():
     
     print(f"\nProcessing novel: {selected_novel}")
     print(f"Using model: {selected_model}")
-    print(f"Group size: {group_size}")
+    print(f"Chapters grouped together (for multiple chapters): {group_size}")
     
     # Initialize novel summarizer
     summarizer = LocalNovelSummarizer(selected_novel,

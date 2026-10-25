@@ -24,16 +24,19 @@ The project is designed to be lightweight and efficient, making it suitable for 
 
 ## Installation
 
-1. Clone the repository:
+1. Clone the repository and open the project directory:
    ```bash
-   git clone https://github.com/omarsrstt/story_summarizer.git
+   git clone <repository-url>
    cd story_summarizer
    ```
 2. Install the required dependencies:
    ```bash
-   pip install -r requirements.txt
+   uv sync
    ```
-3. Configure the `config.json` file with the appropriate website details and selectors.
+   This installs the summarizer's core dependencies. For the scraper and web app, add the
+   extras: `uv sync --extra scraper --extra web`.
+3. Copy `src/scraper_config.example.json` to `src/scraper_config.json` and fill in the target
+   site's URLs and CSS selectors. The real config is gitignored, so site details stay local.
 
 ## Usage
 ### Scraping Chapters
@@ -54,6 +57,9 @@ python summarizer.py --novel <novel_name> --model <model_name> --group-size <gro
 ```
 
    - `novel`: The name of the novel to summarize.
-   - `model`: (Optional) The NLP model to use for summarization (default: meta-llama/Meta-Llama-3.1-8B-Instruct).
-   - `group-size`: (Optional) The number of chapters to group together for summarization (default: 5).
+   - `model`: (Optional) The NLP model to use for summarization (default: `Qwen/Qwen3-4B-Instruct-2507`).
+   - `group-size`: (Optional) The number of chapters to group together for summarization (default: 1).
    - `chapters`: (Optional) Specific chapters or ranges to summarize (e.g., 1,3-5,7).
+
+Model behaviour (quantization, generation parameters, and the summary prompt) is configured per
+model in `src/summarizer_config.json`.

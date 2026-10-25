@@ -1,0 +1,53 @@
+{
+    "websites": [
+        {
+            "name": "Example Site",
+            "base_url": "https://example.com/",
+            "search_url": "https://example.com/search/{}",
+            "novel_url": "https://example.com/novel/{}",
+            "chapter_url": "https://example.com/novel/{}/chapter-{}{}",
+            "search_input_selector": "input#search",
+            "search_item_selector": "div.search-result",
+            "search_title_selector": "h3.title a",
+            "search_author_selector": "span.author",
+            "search_slug_selector": "h3.title a[href]",
+            "title_selector": "h1.novel-title",
+            "author_selector": "div.author a",
+            "description_selector": "div.description",
+            "genre_selector": "div.genres a",
+            "status_selector": "div.status span",
+            "toc_selector": "li.chapter-item a",
+            "content_selector": "div.chapter-content",
+            "chapter_title_selector": "span.chapter-title",
+            "slug_format": "separated"
+        },
+        {
+            "name": "Example Site (alt layout)",
+            "base_url": "https://example.org/",
+            "search_url": "https://example.org/search",
+            "novel_url": "https://example.org/book/{}",
+            "chapter_url": "https://example.org/book/{}/chapter-{}{}",
+            "search_input_selector": "input#searchkey",
+            "search_item_selector": "div.ul-list .li-row",
+            "search_title_selector": "h3.tit a",
+            "search_author_selector": "div.book-author",
+            "search_slug_selector": "h3.book-title a[href]",
+            "title_selector": "h1.tit",
+            "author_selector": "div.right a.a1",
+            "author_selector_exact": "title",
+            "chapter_dropdown": "indexselect",
+            "chapter_dropdown_options": "option",
+            "description_selector": "div.inner",
+            "genre_selector": "h1.tit",
+            "status_selector": "div.right span.s1.s2 a",
+            "toc_selector": "li.chapter-item a",
+            "content_selector": "div.txt",
+            "chapter_title_selector": "div.top span.chapter",
+            "slug_format": "combined"
+        }
+    ],
+    "website": "Example Site",
+    "novel": "example novel title",
+    "chapter_num": "recent",
+    "save_dir": "novels"
+}

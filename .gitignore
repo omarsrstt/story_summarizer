@@ -174,3 +174,12 @@ cython_debug/
 src/config.json
 novels/
 summaries/
+
+# Local scraper config (holds real site URLs) -- see scraper_config.example.json
+src/scraper_config.json
+
+# Throwaway analysis / scratch (kept locally, never published)
+spike_out/
+src/git.txt
+src/test_summary.ipynb
+src/spike_*.py

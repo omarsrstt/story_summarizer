@@ -1,0 +1,138 @@
+{
+    "CHAPTER_GROUP_SIZE": 1,
+    "BATCH_SIZE": 1,
+    "NOVEL_DIR": "novels",
+    "MAX_LENGTH": 1024,
+    "novel": null,
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "chapters": "150-200",
+    "save_dir": "summaries",
+    "model_config":{
+        "Qwen/Qwen3-4B-Instruct-2507": {
+            "chunk_size": 12000,
+            "type" : "causal",
+            "chat_template": true,
+            "quantization": {
+                "type": "4bit",
+                "load_in_4bit": true,
+                "bnb_4bit_use_double_quant": false,
+                "bnb_4bit_quant_type": "nf4",
+                "bnb_4bit_compute_dtype": "bfloat16"
+            },
+            "generation": {
+                "min_length": null,
+                "max_new_tokens": 1400,
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "repetition_penalty": 1.05,
+                "do_sample": false,
+                "no_repeat_ngram_size": 3,
+                "num_beams": 1
+            },
+            "system_prompt": "You are writing a faithful recap of a group of novel chapters.\n\nWrite a chronological recap of what actually happens in the excerpt. Let the length follow the material: cover what is there and no more. Three to six paragraphs is typical.\n\nRules:\n1. Include only events, characters, and details that appear in the excerpt. Add nothing that is not there.\n2. Report what happens; do not interpret it. No thematic commentary, and no phrases like \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n3. The excerpt may end in the middle of a scene. If it does, end the recap at that same point. Do not resolve, complete, or continue past the last event in the excerpt.\n4. Use characters' names explicitly; avoid bare pronouns where a name is clearer.\n5. Embed important dialogue in the narrative rather than listing quotes separately.\n6. No headings, no bullet points, no separate \"analysis\" or \"dialogue breakdown\" sections.",
+            "prompt_template": "Summarize the following excerpt from {chapter_range} of the novel \"{novel}\".\n\n### Excerpt:\n{chapter}\n\n### Recap:",
+            "meta_prompt_template": "Merge the following partial recaps of {chapter_range} of the novel \"{novel}\" into one continuous, chronological recap. Preserve what they contain, including names and concrete detail; add nothing that is not in them, and do not interpret or editorialize.\n\nPartial recaps:\n{summaries}\n\nMerged recap:"
+        },
+        "Qwen/Qwen2.5-7B-Instruct-1M": {
+            "chunk_size": 15000,
+            "type" : "causal",
+            "quantization": {
+                "type": "4bit",
+                "load_in_4bit": true,
+                "bnb_4bit_use_double_quant":false, 
+                "bnb_4bit_quant_type":"nf4",
+                "bnb_4bit_compute_dtype": "bfloat16"
+            },
+            "generation": {
+                "min_length": 300,
+                "max_new_tokens": 1200,
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "top_k": 40,
+                "repetition_penalty": 1.5,
+                "do_sample": true,
+                "no_repeat_ngram_size": 3,
+                "num_beams": 2
+            },
+            "prompt_template": "Generate a detailed, immersive chapter recap in 3-5 dense paragraphs for the following excerpt. Blend actions, dialogue, and consequences seamlessly into a cohesive narrative.\n\n### Requirements:\n1. Length & Depth:\n\t- Strictly 500-700 words.\n\t- Every paragraph must cover a major plot segment with key actions, dialogue, and consequences interwoven.\n\n2. Content Rules:\n\t- Embed pivotal dialogue directly into the narrative. Example:\n\t\t- Bad: \"Reynolds says: 'Hi little Art.'\"\n\t\t- Good: \"Reynolds cradled the newborn, whispering, 'Hi little Art,' as tears streaked his face—unaware the child already understood him.\"\n\t- Always use characters names explicitly (do not use pronouns where possible).\n\t- Include sensory details: Describe tones, expressions, or gestures with dialogue (e.g., 'You knew,' she hissed, her grip tightening on the knife.).\n\n3. Style:\n\t- Write like a novel recap—fluid, vivid, and chronological.\n\t- Avoid headings, bullet points, or standalone dialogue lists.\n\n4. Strictly Forbid:\n\t- Sections like \"Dialogue Breakdown\" or \"Analysis\".\n\t- Generic statements (e.g., \"This was a turning point\"). Show through events instead.\n\n### Chapter Excerpt:\n{chapter}\n\n### Recap:"
+        },
+        "meta-llama/Meta-Llama-3.1-8B-Instruct": {
+            "chunk_size": 7000,
+            "type" : "causal",
+            "quantization": {
+                "type": "4bit",
+                "load_in_4bit": true,
+                "bnb_4bit_use_double_quant":false, 
+                "bnb_4bit_quant_type":"nf4",
+                "bnb_4bit_compute_dtype": "bfloat16"
+            },
+            "generation": {
+                "min_length": 300,
+                "max_new_tokens": 800,
+                "temperature": 0.4,
+                "top_p": 0.95,
+                "top_k": 50,
+                "repetition_penalty": 1.4,
+                "do_sample": true,
+                "no_repeat_ngram_size": 3,
+                "num_beams": 2
+            },
+            "prompt_template": "[INST] Write a concise chapter recap following these rules:\n\t 1. PURELY NARRATIVE - no analysis or commentary\n\t 2. Include 3+ direct quotes from characters within the narrative\n\t 3. Describe key events chronologically\n\t 4. End immediately after the last event\n\n CHAPTER EXCERPT:\n {chapter} \n\n RECAP: [/INST]"
+     
+        },
+        "microsoft/Phi-4-mini-instruct": {
+            "chunk_size": 15000,
+            "type" : "causal",
+            "quantization": {
+                "type": null
+            },
+            "generation": {
+                "min_length": null,
+                "max_new_tokens": 1024,
+                "temperature": 0.3,
+                "top_p": 0.85,
+                "top_k": null,
+                "repetition_penalty": 1.4,
+                "do_sample": true,
+                "no_repeat_ngram_size": null,
+                "num_beams": 1
+            },
+            "prompt_template": "Generate an concise, immersive chapter recap in 3-5 paragraphs for the following excerpt. Blend actions, dialogue, and consequences seamlessly into a cohesive narrative.\n\n### Requirements:\n1. Length & Depth:\n\t- Strictly 300-500 words split into multiple paragraphs.\n\t- Every paragraph must cover a major plot segment with key actions, dialogue, and consequences interwoven.\n\n2. Content Rules:\n\t- Embed pivotal dialogue directly into the narrative. Example:\n\t\t- Bad: \"Reynolds says: 'Hi little Art.'\"\n\t\t- Good: \"Reynolds cradled the newborn, whispering, 'Hi little Art,' as tears streaked his face—unaware the child already understood him.\"\n\t- Always use characters names explicitly (do not use pronouns where possible).\n\t- Include sensory details: Describe tones, expressions, or gestures with dialogue (e.g., 'You knew,' she hissed, her grip tightening on the knife.).\n\n3. Style:\n\t- Write like a novel recap—fluid, vivid, and chronological.\n\t- Avoid headings, bullet points, or standalone dialogue lists.\n\t- Don't make it too long, keep it short, to the point and relevant.\n\n4. Strictly Forbid:\n\t- Sections like \"Dialogue Breakdown\", \"Chapter Summary\" or \"Analysis\".\n\t- Generic statements (e.g., \"This was a turning point\"). Show through events instead.\n\n### Chapter Excerpt:\n{chapter}\n\n### Recap:"
+        },
+        "pszemraj/led-large-book-summary": {
+            "chunk_size": 15000,
+            "type" : "seq2seq",
+            "quantization": {
+                "type": null
+            },
+            "generation": {
+                "min_length": 200,
+                "max_new_tokens": 1024,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "repetition_penalty": 1.3,
+                "do_sample": true,
+                "num_beams": 2
+            },
+            "prompt_template":"Summarize this story/chapter:\n{chapter}"
+        },
+        "default": {
+            "chunk_size": 7000,
+            "type" : "causal",
+            "quantization": {
+                "type": null
+            },
+            "generation": {
+                "min_length": 200,
+                "max_new_tokens": 1024,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "repetition_penalty": 1.3,
+                "do_sample": true,
+                "num_beams": 2
+            },
+            "prompt_template":"Summarize this story/chapter:\n{chapter}"
+        }
+    }
+} 
