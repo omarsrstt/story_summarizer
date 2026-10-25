@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from bs4 import BeautifulSoup
+
 _NUMBER_RE = re.compile(r"chapter\s+(\d+)", re.IGNORECASE)
 
 
@@ -56,3 +58,36 @@ def build_chapter_map(options: list[tuple[str, str]]) -> dict[int, ChapterRef]:
             continue
         chapters[number] = ChapterRef(number, slug, title)
     return chapters
+
+
+def extract_chapter(
+    html: str, content_selector: str, title_selector: str
+) -> tuple[str, str]:
+    """Return ``(title, text)`` pulled from a chapter page.
+
+    Missing nodes yield empty strings rather than raising, so callers can treat
+    a challenge/partial page as "no content" instead of crashing.
+    """
+
+    soup = BeautifulSoup(html, "html.parser")
+    title_node = soup.select_one(title_selector)
+    content_node = soup.select_one(content_selector)
+    title = title_node.get_text(strip=True) if title_node else ""
+    if content_node:
+        text = "\n".join(
+            p.get_text(strip=True) for p in content_node.find_all("p")
+        ) or content_node.get_text(strip=True)
+    else:
+        text = ""
+    return title, text
+
+
+def looks_like_chapter(text: str, min_chars: int = 400) -> bool:
+    """Guard against saving a challenge page or a truncated body as a chapter."""
+
+    if len(text) < min_chars:
+        return False
+    if "just a moment" in text.lower():
+        return False
+    return True
+

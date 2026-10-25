@@ -26,3 +26,30 @@ def test_build_map_uses_title_number_and_keeps_slug():
         1, "chapter-2", "Chapter 1: The Light At The End of The Tunnel"
     )
     assert result[530].slug == "chapter-530-end-story"
+
+
+from scraper_parse import extract_chapter, looks_like_chapter
+
+SAMPLE = """
+<html><body>
+  <div class="top"><span class="chapter">Chapter 4: My Life Now</span></div>
+  <div class="txt"><p>Line one.</p><p>Line two.</p></div>
+</body></html>
+"""
+
+
+def test_extract_returns_title_and_paragraph_text():
+    title, text = extract_chapter(SAMPLE, "div.txt", "div.top span.chapter")
+    assert title == "Chapter 4: My Life Now"
+    assert "Line one." in text and "Line two." in text
+
+
+def test_extract_missing_nodes_returns_empty():
+    assert extract_chapter("<html></html>", "div.txt", "span.chapter") == ("", "")
+
+
+def test_plausibility_rejects_short_or_challenge_text():
+    assert looks_like_chapter("x" * 500) is True
+    assert looks_like_chapter("Just a moment...") is False
+    assert looks_like_chapter("") is False
+
