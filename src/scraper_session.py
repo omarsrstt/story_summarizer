@@ -9,8 +9,15 @@ without opening a browser.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from scraper_parse import ChapterRef, build_chapter_map
+
+
+class ChallengeError(Exception):
+    """Raised when a Cloudflare challenge persists after a single cookie refresh."""
 
 
 @dataclass
@@ -49,3 +56,66 @@ class SessionCache:
         self.path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+
+_CHALLENGE_MARKER = "just a moment"
+
+
+def _is_challenge(body: str) -> bool:
+    return _CHALLENGE_MARKER in body.lower()
+
+
+class FastSession:
+    """Authorised HTTP session backed by a cached harvest.
+
+    ``transport(url, headers, cookies) -> (status, body)`` performs the HTTP call
+    (a seam so tests need no network). ``harvest() -> SessionData`` mints a fresh
+    cookie + chapter list via the browser. When a response is a Cloudflare
+    challenge, the cookies are refreshed **once** and the request retried; a
+    second challenge raises ``ChallengeError``.
+    """
+
+    def __init__(self, site, novel_slug, cache, transport, harvest):
+        self.site = site
+        self.novel_slug = novel_slug
+        self.cache = cache
+        self._transport = transport
+        self._harvest = harvest
+        self._refresh_lock = threading.Lock()
+        self._data = cache.load()
+
+    def _ensure_data(self) -> SessionData:
+        if self._data is None:
+            self._data = self._harvest()
+            self.cache.save(self._data)
+        return self._data
+
+    def _refresh(self) -> SessionData:
+        """Refresh the harvest, collapsing concurrent refreshes into one."""
+
+        with self._refresh_lock:
+            self._data = self._harvest()
+            self.cache.save(self._data)
+            return self._data
+
+    def _get(self, url: str, data: SessionData) -> tuple[int, str]:
+        headers = {"User-Agent": data.user_agent} if data.user_agent else {}
+        return self._transport(url, headers, dict(data.cookies))
+
+    def fetch(self, url: str) -> str:
+        """Return the page body, refreshing cookies once if challenged."""
+
+        data = self._ensure_data()
+        status, body = self._get(url, data)
+        if _is_challenge(body):
+            data = self._refresh()
+            status, body = self._get(url, data)
+            if _is_challenge(body):
+                raise ChallengeError(f"challenge persisted for {url}")
+        return body
+
+    def chapter_map(self) -> dict[int, ChapterRef]:
+        """Return the number→ChapterRef map, harvesting it if not cached."""
+
+        return build_chapter_map(self._ensure_data().chapter_map)
+
