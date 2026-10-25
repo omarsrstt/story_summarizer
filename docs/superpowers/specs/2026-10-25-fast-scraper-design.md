@@ -28,6 +28,8 @@ all.
 | **Off-screen headful Chrome → harvest cookies → close browser** | ✅ page loaded, `cf_clearance` obtained |
 | **HTTP GET a chapter with the harvested cookies** | ✅ **200, ~12–25k chars, ~0.25 s, no browser** |
 | Cookie cache reused in a **fresh process, no browser** | ✅ still authorised |
+| Chapter list via HTTP (`select.select-chapter`) | ❌ present but **0 options** — JS-populated |
+| Chapter list via off-screen browser (click `glyphicon-list-alt`) | ✅ **533 options** — `value`=slug, `text`=chapter title |
 
 Conclusion: a browser is needed **once per cookie lifetime** to pass Cloudflare;
 everything else can be plain HTTP. This is the basis of the design.
@@ -79,8 +81,12 @@ Two engines behind one CLI, default = fast, `--engine legacy` = current code:
 1. Load a cached cookie file (`spike_out`-style cache dir; path TBD).
 2. If no cache, or a probe request returns the challenge (403), acquire cookies:
    launch **off-screen** headful Chrome at `--window-position=-32000,-32000`,
-   load one chapter, wait for the content selector, read cookies + UA, **close**.
-   (Pinning `version_main` to the installed Chrome major version.)
+   load one chapter, wait for the content selector, read cookies + UA, then
+   **harvest the full chapter list** (click the `glyphicon-list-alt` icon and read
+   `select.select-chapter` — an ordered list of `(value, text)` where `value` is
+   the chapter URL slug and `text` is the chapter title). Cache cookies *and* the
+   map together, then **close** the browser.
+   (Pin `version_main` to the installed Chrome major version.)
 3. For each requested chapter: `GET /book/<slug>/chapter-<index>` with
    `curl_cffi` (Chrome impersonation) + cached cookies + matching UA.
 4. Parse with BeautifulSoup: content `div.txt`, title `div.top span.chapter`.
@@ -117,10 +123,15 @@ Options to choose from:
 chapter number read from the page/title; the URL index is used only to fetch.
 Gap-fills therefore line up with the existing corpus.
 
-**URL resolution (builder call):** the fast engine builds a *local-number → URL*
-map by fetching the novel page once per run and reading each chapter's number
-from its page/title; it never computes a URL from an arithmetic offset (the
-offset is not constant). Unmapped numbers are reported, not guessed.
+**URL resolution (builder call):** the fast engine does **not** compute URLs from
+an arithmetic offset (the offset is not constant) and does **not** scrape the
+chapter list from the novel page (it only renders range labels, `C.1 - C.40`,
+and a handful of links). Instead it builds a *local-number → URL* map from the
+`select.select-chapter` list harvested during the browser visit, reading each
+chapter's number from its `text` (e.g. `"Chapter 1: The Light At The End of The
+Tunnel"`). Unmapped numbers are reported, not guessed. Recent chapters use
+slugged URLs (`/chapter-530-end-story`), which the harvested `value` carries
+verbatim; the `c-1: Prologue` entry is not one of the numbered corpus chapters.
 
 ### 7.5 CLI (proposed)
 
