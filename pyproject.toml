@@ -28,6 +28,18 @@ web = [
     "flask",
 ]
 
+# Development-only tooling (unit tests for the parsing/session helpers).
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+# Scripts run with src/ on sys.path, so modules import each other by bare name
+# (e.g. `import scraper_parse`). Mirror that for tests.
+pythonpath = ["src"]
+testpaths = ["tests"]
+
 # PyPI's Windows torch wheel is CPU-only, so bind torch to PyTorch's CUDA index.
 [[tool.uv.index]]
 name = "pytorch-cu130"
