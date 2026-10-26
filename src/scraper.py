@@ -550,6 +550,29 @@ def parse_arguments(websites):
         default=None,
         help="Chapter number",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["fast", "legacy"],
+        default="fast",
+        help="Scraper engine: 'fast' (HTTP, off-screen browser for Cloudflare) "
+             "or 'legacy' (the original Selenium scraper)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=3,
+        help="Fast engine: number of concurrent chapter fetches",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Fast engine: re-scrape and replace chapters that already exist",
+    )
+    parser.add_argument(
+        "--refresh-cookies",
+        action="store_true",
+        help="Fast engine: discard the cached Cloudflare cookies/chapter list and re-harvest",
+    )
     return parser.parse_args()
 
 def get_missing_args(args, config):
@@ -580,17 +603,36 @@ def main():
     config = load_config(config_path)
     websites = config["websites"]
 
-    # Initialize the driver
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Parse args before opening any browser, so the fast engine never needs one
+    # and the legacy engine only opens one when it is actually going to scrape.
+    args = parse_arguments(websites)
+    args = get_missing_args(args, config)
+    print("Input args selected")
+
+    # Fast engine: HTTP-first, one off-screen browser visit for Cloudflare.
+    if args.engine == "fast":
+        from scraper_fast import run_fast  # local import: keeps legacy path import-light
+
+        written = run_fast(
+            config=config,
+            site=args.website,
+            novel_slug=args.novel,
+            chapter_sel=args.chapter_num,
+            save_dir=config["save_dir"],
+            overwrite=args.overwrite,
+            concurrency=args.concurrency,
+            refresh=args.refresh_cookies,
+            repo_root=repo_root,
+        )
+        print(f"Fast engine: {written} chapter(s) written.")
+        return
+
+    # Legacy engine (original Selenium/undetected-chromedriver implementation).
     driver = setup_driver()
 
     try:
-        # Get input args
-        args = parse_arguments(websites)
-
-        # Step 1: Select website, novel, and related variables
-        args = get_missing_args(args, config)
-        print("Input args selected")
-
         # Step 2: Search & select the novel
         # novels_found = search_novels(args.novel, website=args.website, driver=driver)
         # print(tabulate(novels_found, headers="keys", tablefmt="pretty"))
@@ -611,15 +653,15 @@ def main():
             print(f"URL: {novel_metadata['url']}")
         else:
             print("Failed to fetch novel metadata.")
-        
+
         # Step 4: Navigate to the last chapter
         navigate_to_latest_chapter(selected_novel['url'], driver)
-        
+
         # Step 5: Find, scrape and save the chapter(s)
-        scrape_chapters(driver, 
-                        args.website, 
-                        novel_metadata, 
-                        chap_num=args.chapter_num, 
+        scrape_chapters(driver,
+                        args.website,
+                        novel_metadata,
+                        chap_num=args.chapter_num,
                         save_dir=config["save_dir"])
 
     except Exception as e:
@@ -628,7 +670,8 @@ def main():
 
     finally:
         # Close the driver
-         driver.quit()
+        driver.quit()
+
 
 if __name__ == "__main__":
     main()

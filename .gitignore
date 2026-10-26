@@ -178,6 +178,9 @@ summaries/
 # Local scraper config (holds real site URLs) -- see scraper_config.example.json
 src/scraper_config.json
 
+# Fast scraper's cached Cloudflare cookie + chapter list (site-specific, local only)
+.scraper_cache/
+
 # Working artifacts for plan execution (ledger, briefs, review packages)
 .superpowers/
 

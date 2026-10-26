@@ -186,7 +186,14 @@ def harvest_session(
         driver.get(start_url)
         user_agent = driver.execute_script("return navigator.userAgent") or ""
 
-        icon = driver.find_elements("class name", icon_selector)
+        # Wait for the chapter-list icon to render before clicking it; clicking
+        # before the page has loaded silently yields no options.
+        icon = []
+        for _ in range(30):
+            icon = driver.find_elements("class name", icon_selector)
+            if icon:
+                break
+            time.sleep(0.5)
         if icon:
             driver.execute_script("arguments[0].click();", icon[0])
 

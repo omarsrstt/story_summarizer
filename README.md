@@ -40,14 +40,36 @@ The project is designed to be lightweight and efficient, making it suitable for 
 
 ## Usage
 ### Scraping Chapters
-To scrape chapters from a website, run the `scraper.py` script:
+Two engines are available. The **fast** engine (default) passes Cloudflare once with an
+off-screen browser, caches the resulting cookie and the site's chapter list, then fetches each
+chapter over plain HTTP. The browser never becomes visible and never steals focus, and existing
+chapters are skipped, so it is safe to run repeatedly (e.g. on a schedule) to pick up new
+chapters. The **legacy** engine is the original Selenium/undetected-chromedriver scraper, kept
+as a fallback.
 
 ```bash
-python scraper.py --website <website_name> --novel <novel_name> --chapter_num <chapter_number>
+# Fast engine (default)
+uv run python src/scraper.py --website <website_name> --novel <novel_slug> --chapter_num <selection>
+
+# Legacy engine (failsafe)
+uv run python src/scraper.py --engine legacy --website <website_name> --novel <novel_name> --chapter_num <chapter_number>
 ```
-   - `website`: The name of the website to scrape from (as defined in config.json).
-   - `novel`: The name of the novel to scrape.
-   - `chapter_num`: (Optional) The specific chapter number to scrape. If omitted, all chapters will be scraped.
+
+   - `engine`: `fast` (default) or `legacy`.
+   - `website`: The name of the website to scrape from (as defined in the config).
+   - `novel`: The novel to scrape. The fast engine expects the site's **slug**; the legacy engine
+     expects the search name.
+   - `chapter_num`: (Optional) A chapter, list, or range (e.g. `5`, `1,3-5`, or `recent`). If
+     omitted, all chapters are scraped.
+   - `concurrency`: (Fast engine) Concurrent chapter fetches (default: 3). Keep it modest — the
+     site rate-limits aggressive clients.
+   - `overwrite`: (Fast engine) Re-scrape and replace chapters that already exist. By default
+     existing chapters are skipped.
+   - `refresh-cookies`: (Fast engine) Discard the cached Cloudflare cookie/chapter list and
+     re-harvest. Use this if a run starts failing with challenges.
+
+The fast engine caches its cookie and chapter list under `.scraper_cache/` (gitignored) and
+re-harvests automatically when a request is challenged.
 
 ### Summarizing Chapters
 To summarize the scraped chapters, run the `summarizer.py` script:

@@ -74,9 +74,19 @@ def extract_chapter(
     content_node = soup.select_one(content_selector)
     title = title_node.get_text(strip=True) if title_node else ""
     if content_node:
-        text = "\n".join(
-            p.get_text(strip=True) for p in content_node.find_all("p")
-        ) or content_node.get_text(strip=True)
+        # Drop ad/script wrappers, as the legacy Selenium scraper does.
+        for element in content_node.find_all(["script", "style", "div", "aside"]):
+            element.decompose()
+        paragraphs = content_node.find_all("p")
+        # The site wraps its paragraphs in an outer <p> (<p><p>..</p></p>). A
+        # browser auto-closes that outer tag, but html.parser nests it, which
+        # would emit every paragraph twice. Skip any <p> that contains another.
+        paragraphs = [p for p in paragraphs if not p.find("p")]
+        text = "\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+        if not text:
+            # Some layouts separate lines with <br> rather than <p>; fall back to
+            # the node's own text so such chapters are not saved empty.
+            text = content_node.get_text(strip=True)
     else:
         text = ""
     return title, text

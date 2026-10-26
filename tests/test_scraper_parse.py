@@ -53,3 +53,24 @@ def test_plausibility_rejects_short_or_challenge_text():
     assert looks_like_chapter("Just a moment...") is False
     assert looks_like_chapter("") is False
 
+
+NESTED = (
+    '<div class="txt">'
+    "<div><script>ad('" + ("x" * 500) + "')</script></div>"
+    "<p><p>First para.</p><p>Second para.</p></p>"
+    "</div>"
+)
+
+
+def test_extract_does_not_double_count_p_nested_in_p():
+    # html.parser nests these <p>s; a browser (and the site's page_source) would
+    # have auto-closed the outer <p>, so we must not emit the paragraphs twice.
+    _, text = extract_chapter(NESTED, "div.txt", "span.chapter")
+    assert text == "First para.\nSecond para."
+
+
+def test_extract_excludes_scripts_and_ad_divs():
+    _, text = extract_chapter(NESTED, "div.txt", "span.chapter")
+    assert "x" * 50 not in text
+
+

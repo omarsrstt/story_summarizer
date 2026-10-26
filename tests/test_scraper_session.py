@@ -205,3 +205,43 @@ def test_harvest_quits_browser_even_on_error(tmp_path):
     assert driver.quit_called is True
 
 
+def test_harvest_waits_for_icon_before_clicking(tmp_path, monkeypatch):
+    import time
+
+    from scraper_session import harvest_session
+
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    class _SlowDriver(_StubDriver):
+        def __init__(self):
+            super().__init__()
+            self.icon_calls = 0
+            self.clicked = False
+
+        def find_elements(self, by, sel):
+            if sel == "i":  # the icon selector: not present at first
+                self.icon_calls += 1
+                return [object()] if self.icon_calls >= 3 else []
+            if "select-chapter" in sel:
+                return (
+                    [_StubSelect([_StubOption("chapter-2", "Chapter 1: X")])]
+                    if self.clicked
+                    else []
+                )
+            return []
+
+        def execute_script(self, js, *args):
+            if "click" in js:
+                self.clicked = True
+            return "UA"
+
+    driver = _SlowDriver()
+    site = {
+        "base_url": "https://x/",
+        "chapter_list_icon_selector": "i",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    data = harvest_session(site, "novel", 155, driver_factory=lambda major: driver)
+    assert data.chapter_map == [("chapter-2", "Chapter 1: X")]
+
+

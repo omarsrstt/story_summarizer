@@ -22,6 +22,7 @@ scraper = [
     "beautifulsoup4",
     "tabulate",
     "webdriver-manager",
+    "curl_cffi",
 ]
 # Needed to run the web API (src/web_api.py)
 web = [
