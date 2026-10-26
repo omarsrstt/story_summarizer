@@ -556,7 +556,8 @@ git commit -m "feat(scraper): wire the fast engine in as the default CLI"
 
 - `uv run pytest -v` is green.
 - Fast-fetched chapter 1 paragraph text equals a fresh legacy scrape of chapter 1.
-- Filling gap chapter 510 writes `chapter_510.txt`; the corpus has no collision afterward.
+- Requesting a number absent from the site's chapter list (e.g. 510, since the
+  list jumps 509→513) is reported and skipped; no file is written.
 - A 20-chapter run with `--concurrency 4` completes with no visible window and never takes focus.
 - Blanking the cached cookie triggers exactly one off-screen refresh, then the run continues.
 - `git grep -i` over `HEAD` for real site names/URLs finds nothing outside the gitignored real config.

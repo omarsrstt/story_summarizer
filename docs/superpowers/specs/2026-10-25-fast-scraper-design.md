@@ -185,8 +185,9 @@ All owner-facing questions are now settled (§7.4 numbering, §7.6 no auto-fallb
 
 - Byte-compare fast-fetched chapters against existing local files for the same
   chapters (ch1, ch5) — expect identical content.
-- Fetch a gap chapter (e.g. 510) and confirm it is written correctly and the
-  corpus reads 516 files with no collision.
+- Request an unmapped number and confirm it is reported and skipped without
+  writing a file or crashing (the site itself skips 510–512; its chapter list
+  jumps from 509 to 513, so there is nothing to fetch there).
 - Time a 20-chapter run sequentially vs `--concurrency 4`.
 - Confirm no window appears on screen and focus is never taken.
 - Confirm a stale/blanked cookie triggers exactly one refresh, then continues.
