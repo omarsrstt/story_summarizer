@@ -130,3 +130,78 @@ def test_chapter_map_builds_from_harvested_options(tmp_path):
     )
     assert s.chapter_map() == {1: ChapterRef(1, "chapter-2", "Chapter 1: X")}
 
+
+class _StubOption:
+    def __init__(self, v, t):
+        self._v, self.text = v, t
+
+    def get_attribute(self, _):
+        return self._v
+
+
+class _StubSelect:
+    def __init__(self, opts):
+        self._opts = opts
+
+    def find_elements(self, by, sel):
+        return self._opts
+
+
+class _StubDriver:
+    def __init__(self):
+        self.quit_called = False
+
+    def get(self, url):
+        pass
+
+    def execute_script(self, js, *args):
+        return "UA"
+
+    def get_cookies(self):
+        return [{"name": "cf_clearance", "value": "abc"}]
+
+    def find_elements(self, by, sel):
+        if "select-chapter" in sel:
+            return [_StubSelect([_StubOption("chapter-2", "Chapter 1: X")])]
+        return [object()]
+
+    def quit(self):
+        self.quit_called = True
+
+
+def test_harvest_reads_cookies_ua_and_options(tmp_path):
+    from scraper_session import harvest_session
+
+    driver = _StubDriver()
+    site = {
+        "base_url": "https://x/",
+        "chapter_list_icon_selector": "i",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    data = harvest_session(site, "novel", 155, driver_factory=lambda major: driver)
+    assert data.user_agent == "UA"
+    assert data.cookies["cf_clearance"] == "abc"
+    assert data.chapter_map == [("chapter-2", "Chapter 1: X")]
+    assert driver.quit_called is True
+
+
+def test_harvest_quits_browser_even_on_error(tmp_path):
+    from scraper_session import harvest_session
+
+    class _Boom(_StubDriver):
+        def get(self, url):
+            raise RuntimeError("boom")
+
+    driver = _Boom()
+    site = {
+        "base_url": "https://x/",
+        "chapter_list_icon_selector": "i",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    try:
+        harvest_session(site, "novel", 155, driver_factory=lambda major: driver)
+    except RuntimeError:
+        pass
+    assert driver.quit_called is True
+
+
