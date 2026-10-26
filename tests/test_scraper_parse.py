@@ -74,3 +74,16 @@ def test_extract_excludes_scripts_and_ad_divs():
     assert "x" * 50 not in text
 
 
+INLINE = (
+    '<div class="top"><span class="chapter">Chapter 9: Inline</span></div>'
+    "<div class=\"txt\"><p>Hello <b>bolded</b> world.</p></div>"
+)
+
+
+def test_extract_matches_legacy_for_inline_markup():
+    # Legacy uses p.get_text().strip(); get_text(strip=True) would glue words to
+    # adjacent inline tags ("Helloboldedworld."), diverging from the corpus.
+    _, text = extract_chapter(INLINE, "div.txt", "div.top span.chapter")
+    assert text == "Hello bolded world."
+
+

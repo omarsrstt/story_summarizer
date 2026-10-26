@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import time
 
 from scraper import parse_chapter_input
 from scraper_parse import ChapterRef, extract_chapter, looks_like_chapter
@@ -25,26 +26,56 @@ __all__ = ["ChapterRef", "chapter_url", "make_session", "run_fast"]
 
 CACHE_DIRNAME = ".scraper_cache"
 
+# Retry only transport-level blips (timeouts -> status 0, and 5xx). A 403 is left
+# alone: FastSession decides whether it is a challenge (refresh) or rate-limiting.
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE = 0.5
+
 
 def chapter_url(site: dict, novel_slug: str, slug: str) -> str:
-    """Full chapter URL from the site base, novel slug, and chapter slug."""
+    """Full chapter URL from the site's configured ``fast_chapter_url`` template.
 
-    return f"{site['base_url'].rstrip('/')}/book/{novel_slug}/{slug}"
+    The template uses ``{novel_slug}`` and ``{slug}`` placeholders, so the engine
+    is not tied to one site's URL shape.
+    """
+
+    return site["fast_chapter_url"].format(novel_slug=novel_slug, slug=slug)
 
 
-def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
-    """Fetch ``url`` with curl_cffi impersonating Chrome. Returns (status, body)."""
+def _raw_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
+    """Single curl_cffi GET (no retries). Returns (status, body); status 0 on error."""
 
     from curl_cffi import requests as cffi
 
-    resp = cffi.get(
-        url,
-        impersonate="chrome",
-        headers=headers,
-        cookies=cookies,
-        timeout=30,
-    )
-    return resp.status_code, resp.text
+    try:
+        resp = cffi.get(
+            url,
+            impersonate="chrome",
+            headers=headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        return resp.status_code, resp.text
+    except Exception:  # noqa: BLE001 - timeouts raise here; surfaced as status 0
+        return 0, ""
+
+
+def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
+    """Fetch ``url`` with curl_cffi, retrying transient failures with backoff.
+
+    A timeout (status 0) or a 5xx is retried up to ``_MAX_ATTEMPTS`` times with
+    exponential backoff. Other statuses (including a 403, which may be a
+    Cloudflare challenge) are returned immediately so ``FastSession`` can react.
+    """
+
+    status, body = 0, ""
+    for attempt in range(_MAX_ATTEMPTS):
+        status, body = _raw_transport(url, headers, cookies)
+        if status != 0 and status < 500:
+            return status, body
+        if attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_BACKOFF_BASE * (2**attempt))
+    return status, body
 
 
 def make_session(
@@ -67,7 +98,6 @@ def make_session(
 
 
 def run_fast(
-    config: dict,
     site: dict,
     novel_slug: str,
     chapter_sel: str,
@@ -76,6 +106,7 @@ def run_fast(
     concurrency: int,
     refresh: bool,
     repo_root,
+    delay: float = 0.0,
 ) -> int:
     """Scrape the requested chapters with the fast engine; return the count written."""
 
@@ -112,6 +143,8 @@ def run_fast(
     title_selector = site["chapter_title_selector"]
 
     def fetch_one(number: int) -> tuple[int, str, str]:
+        if delay:
+            time.sleep(delay)
         ref = chapter_map[number]
         body = session.fetch(chapter_url(site, novel_slug, ref.slug))
         title, text = extract_chapter(body, content_selector, title_selector)

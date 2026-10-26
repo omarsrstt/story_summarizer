@@ -22,6 +22,10 @@ from bs4 import BeautifulSoup
 
 _NUMBER_RE = re.compile(r"chapter\s+(\d+)", re.IGNORECASE)
 
+# Substring of a Cloudflare interstitial body; shared so the challenge check and
+# the plausibility guard cannot drift apart.
+CHALLENGE_MARKER = "just a moment"
+
 
 @dataclass(frozen=True)
 class ChapterRef:
@@ -72,7 +76,7 @@ def extract_chapter(
     soup = BeautifulSoup(html, "html.parser")
     title_node = soup.select_one(title_selector)
     content_node = soup.select_one(content_selector)
-    title = title_node.get_text(strip=True) if title_node else ""
+    title = title_node.get_text().strip() if title_node else ""
     if content_node:
         # Drop ad/script wrappers, as the legacy Selenium scraper does.
         for element in content_node.find_all(["script", "style", "div", "aside"]):
@@ -82,7 +86,7 @@ def extract_chapter(
         # browser auto-closes that outer tag, but html.parser nests it, which
         # would emit every paragraph twice. Skip any <p> that contains another.
         paragraphs = [p for p in paragraphs if not p.find("p")]
-        text = "\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+        text = "\n".join(p.get_text().strip() for p in paragraphs if p.get_text().strip())
         if not text:
             # Some layouts separate lines with <br> rather than <p>; fall back to
             # the node's own text so such chapters are not saved empty.
@@ -97,7 +101,7 @@ def looks_like_chapter(text: str, min_chars: int = 400) -> bool:
 
     if len(text) < min_chars:
         return False
-    if "just a moment" in text.lower():
+    if CHALLENGE_MARKER in text.lower():
         return False
     return True
 

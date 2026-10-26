@@ -573,6 +573,12 @@ def parse_arguments(websites):
         action="store_true",
         help="Fast engine: discard the cached Cloudflare cookies/chapter list and re-harvest",
     )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Fast engine: seconds to wait before each chapter fetch (politeness)",
+    )
     return parser.parse_args()
 
 def get_missing_args(args, config):
@@ -616,7 +622,6 @@ def main():
         from scraper_fast import run_fast  # local import: keeps legacy path import-light
 
         written = run_fast(
-            config=config,
             site=args.website,
             novel_slug=args.novel,
             chapter_sel=args.chapter_num,
@@ -625,6 +630,7 @@ def main():
             concurrency=args.concurrency,
             refresh=args.refresh_cookies,
             repo_root=repo_root,
+            delay=args.delay,
         )
         print(f"Fast engine: {written} chapter(s) written.")
         return

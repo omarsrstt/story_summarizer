@@ -504,7 +504,7 @@ import sys
 import pytest
 from scraper import parse_arguments
 
-WEBSITES = [{"name": "Light Novel Pub"}]
+WEBSITES = [{"name": "Example Site"}]
 
 def _parse(monkeypatch, *argv):
     monkeypatch.setattr(sys, "argv", ["scraper.py", *argv])

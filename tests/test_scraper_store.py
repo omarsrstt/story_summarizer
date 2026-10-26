@@ -35,3 +35,14 @@ def test_overwrite_replaces_content(tmp_path):
     assert (tmp_path / "novel" / "chapter_7.txt").read_text(encoding="utf-8").endswith(
         "new"
     )
+
+
+def test_overwrite_padded_file_in_place(tmp_path):
+    # Overwriting a legacy padded chapter must not leave a second, unpadded copy.
+    d = tmp_path / "novel"
+    d.mkdir()
+    (d / "chapter_0007.txt").write_text("old", encoding="utf-8")
+    path = write_chapter(tmp_path, "novel", 7, "Chapter 7: X", "new", overwrite=True)
+    assert Path(path).name == "chapter_0007.txt"
+    assert (d / "chapter_0007.txt").read_text(encoding="utf-8").endswith("new")
+    assert not (d / "chapter_7.txt").exists()

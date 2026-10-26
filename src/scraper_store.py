@@ -51,9 +51,12 @@ def write_chapter(
     directory = _novel_dir(save_root, novel_name)
     directory.mkdir(parents=True, exist_ok=True)
 
-    target = directory / chapter_filename(number)
-    if not overwrite and existing_chapter(save_root, novel_name, number) is not None:
+    existing = existing_chapter(save_root, novel_name, number)
+    if not overwrite and existing is not None:
         return None
+
+    # Overwrite a legacy padded file in place so we do not leave a second copy.
+    target = existing if existing is not None else directory / chapter_filename(number)
 
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(f"{title}\n\n{content}", encoding="utf-8")

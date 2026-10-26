@@ -98,7 +98,10 @@ Two engines behind one CLI, default = fast, `--engine legacy` = current code:
 - Default: **small concurrency (3–4 parallel requests)** with a small
   inter-request delay; `--concurrency N` tunes it (use `1` for sequential).
 - **Retry with exponential backoff** on timeout/5xx (we observed consistent
-  timeouts on some chapter indices and 403s after bursts).
+  timeouts on some chapter indices and 403s after bursts). **Implemented:**
+  `default_transport` retries up to 3 times with exponential backoff (0.5s, 1s)
+  on a timeout (status 0) or 5xx; a `--delay S` flag adds an optional pause
+  before each fetch.
 - No `focus_window()`, no multi-second fixed sleeps.
 
 ### 7.4 Chapter discovery & numbering — **needs your call**
@@ -164,7 +167,9 @@ browser window.
   the-beginning-after-the-end`). Name→slug search stays in legacy for now.
 - **Genericity:** the fast engine reads `base_url`, chapter/content/title
   selectors from `scraper_config.json`, with a new per-site URL template; it is
-  not hardcoded to one site.
+  not hardcoded to one site. **Implemented:** the template lives in the
+  `fast_chapter_url` key (placeholders `{novel_slug}`/`{slug}`) and the harvest
+  seed in `fast_seed_slug`, used by both `chapter_url()` and `harvest_session`.
 - **Content bar:** "identical" means **paragraph text equal to a fresh legacy
   scrape**, not byte-equal to the pre-existing corpus (which legacy itself no
   longer reproduces byte-for-byte).

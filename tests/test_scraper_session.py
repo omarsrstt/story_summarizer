@@ -1,5 +1,10 @@
 from scraper_session import SessionCache, SessionData
 
+import pytest
+
+from scraper_parse import ChapterRef
+from scraper_session import ChallengeError, FastSession
+
 
 def test_roundtrip(tmp_path):
     cache = SessionCache(tmp_path / "c.json")
@@ -23,12 +28,6 @@ def test_corrupt_file_loads_none(tmp_path):
     p = tmp_path / "c.json"
     p.write_text("{ not json", encoding="utf-8")
     assert SessionCache(p).load() is None
-
-
-import pytest
-
-from scraper_parse import ChapterRef
-from scraper_session import ChallengeError, FastSession
 
 
 def _session(transport, harvest, tmp_path):
@@ -85,6 +84,40 @@ def test_fetch_gives_up_after_one_refresh(tmp_path):
     assert calls["harvest"] == 1
 
 
+def test_concurrent_challenge_refreshes_once(tmp_path):
+    # A stale cookie challenges every in-flight request at once; the refresh must
+    # be collapsed so only ONE off-screen harvest happens, not one per worker.
+    import threading
+
+    calls = {"harvest": 0}
+    barrier = threading.Barrier(4)
+
+    def transport(u, h, c):
+        barrier.wait()  # keep all four requests in flight together
+        if c.get("cf_clearance") == "old":
+            return (200, "Just a moment...")
+        return (200, "<html>real</html>")
+
+    def harvest():
+        calls["harvest"] += 1
+        return SessionData("UA2", {"cf_clearance": "new"}, [])
+
+    s = _seeded_session(transport, harvest, tmp_path)
+    results = []
+
+    def do_fetch():
+        results.append(s.fetch("https://x/book/novel/chapter-2"))
+
+    threads = [threading.Thread(target=do_fetch) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == ["<html>real</html>"] * 4
+    assert calls["harvest"] == 1
+
+
 def test_empty_cache_harvests_once_before_first_fetch(tmp_path):
     calls = {"harvest": 0}
 
@@ -131,6 +164,38 @@ def test_chapter_map_builds_from_harvested_options(tmp_path):
     assert s.chapter_map() == {1: ChapterRef(1, "chapter-2", "Chapter 1: X")}
 
 
+def test_refresh_preserves_map_when_harvest_returns_empty(tmp_path):
+    # A transient harvest failure (a fresh cookie but no chapter list) must not
+    # wipe the good cached map, or every later run finds nothing to fetch.
+    def transport(u, h, c):
+        return (403, "Just a moment...") if c.get("cf_clearance") == "old" else (200, "<html>real</html>")
+
+    def harvest():
+        return SessionData("UA2", {"cf_clearance": "new"}, [])  # empty list
+
+    cache = SessionCache(tmp_path / "c.json")
+    cache.save(SessionData("UA", {"cf_clearance": "old"}, [("chapter-2", "Chapter 1: X")]))
+    s = FastSession({"base_url": "https://x/"}, "novel", cache, transport, harvest)
+    assert s.fetch("https://x/book/novel/chapter-2") == "<html>real</html>"
+    assert s.chapter_map() == {1: ChapterRef(1, "chapter-2", "Chapter 1: X")}
+
+
+def test_empty_cached_map_triggers_reharvest(tmp_path):
+    # A cache holding a cookie but no chapter list (e.g. from an earlier bad
+    # harvest) must re-harvest instead of reporting "nothing to fetch" forever.
+    calls = {"harvest": 0}
+
+    def harvest():
+        calls["harvest"] += 1
+        return SessionData("UA", {"cf_clearance": "v"}, [("chapter-2", "Chapter 1: X")])
+
+    cache = SessionCache(tmp_path / "c.json")
+    cache.save(SessionData("UA", {"cf_clearance": "old"}, []))
+    s = FastSession({"base_url": "https://x/"}, "novel", cache, lambda u, h, c: (200, "ok"), harvest)
+    assert s.chapter_map() == {1: ChapterRef(1, "chapter-2", "Chapter 1: X")}
+    assert calls["harvest"] == 1
+
+
 class _StubOption:
     def __init__(self, v, t):
         self._v, self.text = v, t
@@ -169,12 +234,42 @@ class _StubDriver:
         self.quit_called = True
 
 
+def test_harvest_looks_up_icon_with_css_selector(tmp_path):
+    from scraper_session import harvest_session
+
+    class _RecDriver(_StubDriver):
+        def __init__(self):
+            super().__init__()
+            self.icon_by = None
+
+        def find_elements(self, by, sel):
+            if sel == ".the-icon":
+                self.icon_by = by
+                return [object()]
+            if "select-chapter" in sel:
+                return [_StubSelect([_StubOption("chapter-2", "Chapter 1: X")])]
+            return []
+
+    driver = _RecDriver()
+    site = {
+        "base_url": "https://x/",
+        "fast_chapter_url": "https://x/book/{novel_slug}/{slug}",
+        "fast_seed_slug": "chapter-2",
+        "chapter_list_icon_selector": ".the-icon",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    harvest_session(site, "novel", 155, driver_factory=lambda major: driver)
+    assert driver.icon_by == "css selector"
+
+
 def test_harvest_reads_cookies_ua_and_options(tmp_path):
     from scraper_session import harvest_session
 
     driver = _StubDriver()
     site = {
         "base_url": "https://x/",
+        "fast_chapter_url": "https://x/book/{novel_slug}/{slug}",
+        "fast_seed_slug": "chapter-2",
         "chapter_list_icon_selector": "i",
         "chapter_list_selector": "select.select-chapter",
     }
@@ -183,6 +278,23 @@ def test_harvest_reads_cookies_ua_and_options(tmp_path):
     assert data.cookies["cf_clearance"] == "abc"
     assert data.chapter_map == [("chapter-2", "Chapter 1: X")]
     assert driver.quit_called is True
+
+
+def test_harvest_uses_config_url_template_and_seed(tmp_path):
+    from scraper_session import harvest_session
+
+    driver = _StubDriver()
+    seen = {}
+    driver.get = lambda url: seen.__setitem__("url", url)
+    site = {
+        "base_url": "https://x/",
+        "fast_chapter_url": "https://x/read/{novel_slug}/{slug}",
+        "fast_seed_slug": "start-here",
+        "chapter_list_icon_selector": "i",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    harvest_session(site, "novel", 155, driver_factory=lambda major: driver)
+    assert seen["url"] == "https://x/read/novel/start-here"
 
 
 def test_harvest_quits_browser_even_on_error(tmp_path):
@@ -195,6 +307,8 @@ def test_harvest_quits_browser_even_on_error(tmp_path):
     driver = _Boom()
     site = {
         "base_url": "https://x/",
+        "fast_chapter_url": "https://x/book/{novel_slug}/{slug}",
+        "fast_seed_slug": "chapter-2",
         "chapter_list_icon_selector": "i",
         "chapter_list_selector": "select.select-chapter",
     }
@@ -238,6 +352,8 @@ def test_harvest_waits_for_icon_before_clicking(tmp_path, monkeypatch):
     driver = _SlowDriver()
     site = {
         "base_url": "https://x/",
+        "fast_chapter_url": "https://x/book/{novel_slug}/{slug}",
+        "fast_seed_slug": "chapter-2",
         "chapter_list_icon_selector": "i",
         "chapter_list_selector": "select.select-chapter",
     }

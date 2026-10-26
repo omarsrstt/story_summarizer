@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scraper_parse import ChapterRef, build_chapter_map
+from scraper_parse import CHALLENGE_MARKER, ChapterRef, build_chapter_map
 
 
 class ChallengeError(Exception):
@@ -58,7 +58,7 @@ class SessionCache:
         )
 
 
-_CHALLENGE_MARKER = "just a moment"
+_CHALLENGE_MARKER = CHALLENGE_MARKER
 
 
 def _is_challenge(body: str) -> bool:
@@ -86,17 +86,31 @@ class FastSession:
 
     def _ensure_data(self) -> SessionData:
         if self._data is None:
-            self._data = self._harvest()
-            self.cache.save(self._data)
+            self._store_harvest(None)
         return self._data
 
-    def _refresh(self) -> SessionData:
-        """Refresh the harvest, collapsing concurrent refreshes into one."""
+    def _store_harvest(self, previous: SessionData | None) -> SessionData:
+        """Harvest, preserve a good chapter list if the new one is empty, and save."""
+
+        fresh = self._harvest()
+        if previous is not None and not fresh.chapter_map and previous.chapter_map:
+            fresh = SessionData(fresh.user_agent, fresh.cookies, previous.chapter_map)
+        self._data = fresh
+        self.cache.save(self._data)
+        return self._data
+
+    def _refresh(self, stale: SessionData) -> SessionData:
+        """Refresh the harvest, collapsing concurrent refreshes into one.
+
+        ``stale`` is the :class:`SessionData` whose cookie was challenged. If
+        another worker has already replaced it while we waited for the lock, that
+        newer data is reused instead of harvesting again.
+        """
 
         with self._refresh_lock:
-            self._data = self._harvest()
-            self.cache.save(self._data)
-            return self._data
+            if self._data is not stale:
+                return self._data
+            return self._store_harvest(stale)
 
     def _get(self, url: str, data: SessionData) -> tuple[int, str]:
         headers = {"User-Agent": data.user_agent} if data.user_agent else {}
@@ -108,16 +122,24 @@ class FastSession:
         data = self._ensure_data()
         status, body = self._get(url, data)
         if _is_challenge(body):
-            data = self._refresh()
+            data = self._refresh(data)
             status, body = self._get(url, data)
             if _is_challenge(body):
                 raise ChallengeError(f"challenge persisted for {url}")
         return body
 
     def chapter_map(self) -> dict[int, ChapterRef]:
-        """Return the number→ChapterRef map, harvesting it if not cached."""
+        """Return the number→ChapterRef map, harvesting it if not cached.
 
-        return build_chapter_map(self._ensure_data().chapter_map)
+        A cache that holds a cookie but no chapter list (e.g. from a failed
+        harvest) is re-harvested rather than reported as empty forever.
+        """
+
+        if not self._ensure_data().chapter_map:
+            with self._refresh_lock:
+                if not self._data.chapter_map:
+                    self._store_harvest(self._data)
+        return build_chapter_map(self._data.chapter_map)
 
 
 def default_driver_factory(chrome_major: int):
@@ -157,11 +179,12 @@ def _read_options(driver, selector: str) -> list[tuple[str, str]]:
             best = opts
     if not best:
         return []
-    return [
-        (opt.get_attribute("value"), opt.text)
-        for opt in best
-        if opt.get_attribute("value")
-    ]
+    result = []
+    for opt in best:
+        value = opt.get_attribute("value")
+        if value:
+            result.append((value, opt.text))
+    return result
 
 
 def harvest_session(
@@ -176,8 +199,9 @@ def harvest_session(
 
     import time
 
-    base = site["base_url"].rstrip("/")
-    start_url = f"{base}/book/{novel_slug}/chapter-2"
+    start_url = site["fast_chapter_url"].format(
+        novel_slug=novel_slug, slug=site["fast_seed_slug"]
+    )
     icon_selector = site["chapter_list_icon_selector"]
     list_selector = site["chapter_list_selector"]
 
@@ -190,7 +214,7 @@ def harvest_session(
         # before the page has loaded silently yields no options.
         icon = []
         for _ in range(30):
-            icon = driver.find_elements("class name", icon_selector)
+            icon = driver.find_elements("css selector", icon_selector)
             if icon:
                 break
             time.sleep(0.5)

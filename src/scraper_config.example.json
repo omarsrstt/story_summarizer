@@ -19,8 +19,10 @@
             "toc_selector": "li.chapter-item a",
             "content_selector": "div.chapter-content",
             "chapter_title_selector": "span.chapter-title",
-            "chapter_list_icon_selector": "example-icon-class",
+            "chapter_list_icon_selector": ".example-icon",
             "chapter_list_selector": "select.select-chapter",
+            "fast_chapter_url": "https://example.com/book/{novel_slug}/{slug}",
+            "fast_seed_slug": "chapter-2",
             "slug_format": "separated"
         },
         {
@@ -45,8 +47,10 @@
             "toc_selector": "li.chapter-item a",
             "content_selector": "div.txt",
             "chapter_title_selector": "div.top span.chapter",
-            "chapter_list_icon_selector": "example-icon-class",
+            "chapter_list_icon_selector": ".example-icon",
             "chapter_list_selector": "select.select-chapter",
+            "fast_chapter_url": "https://example.org/book/{novel_slug}/{slug}",
+            "fast_seed_slug": "chapter-2",
             "slug_format": "combined"
         }
     ],
