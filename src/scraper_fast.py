@@ -79,12 +79,18 @@ def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]
 
 
 def make_session(
-    *, site: dict, novel_slug: str, cache_path, chrome_major: int = 155, refresh: bool = False
+    *,
+    site: dict,
+    novel_slug: str,
+    cache_path,
+    chrome_major: int | None = None,
+    refresh: bool = False,
 ) -> FastSession:
     """Build a :class:`FastSession` wired to the real browser harvest and transport.
 
     Thin seam: tests monkeypatch this to inject a fake session. ``refresh`` drops
-    any cached harvest so the next call re-mints it via the browser.
+    any cached harvest so the next call re-mints it via the browser. ``chrome_major``
+    defaults to the installed Chrome version (see ``detect_chrome_major``).
     """
 
     cache_path = Path(cache_path)

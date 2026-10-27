@@ -16,7 +16,7 @@
 - Modules import each other by **bare name** (`from scraper_parse import ...`) because scripts run with `src/` on `sys.path`. Configure pytest with `pythonpath = ["src"]`.
 - `curl_cffi` is added **only** to the `scraper` optional extra; `pytest` only to a dev group.
 - The browser must never be visible or steal focus: always `--window-position=-32000,-32000` (no `focus_window()`, no `maximize_window()`).
-- Pin ChromeDriver with `version_main=` the installed Chrome major version (currently `155`).
+- Pin ChromeDriver with `version_main=` the installed Chrome major version. Detected at runtime via `detect_chrome_major()` (Windows: the Chrome update beacon `HKCU\Software\Google\Chrome\BLBeacon\version`; elsewhere: `google-chrome --version`); falls back to letting the library auto-detect if unknown.
 - No fixed multi-second sleeps on the fast path.
 - Existing chapters are **skipped by default**; `--overwrite` forces. Writes go to a temp file, renamed into place only after a plausibility check. A chapter is considered present if **either** `chapter_<n>.txt` (corpus form) **or** `chapter_<n:04d>.txt` (legacy form) exists.
 - File name written is `chapter_<n>.txt` where `<n>` is the number parsed from the chapter **title** (not the URL index).
@@ -358,8 +358,9 @@ git commit -m "feat(scraper): HTTP fetch that refreshes cookies once on challeng
 
 **Interfaces:**
 - Produces:
-  - `harvest_session(site: dict, novel_slug: str, chrome_major: int, driver_factory) -> SessionData` — opens an off-screen driver, navigates to a chapter page, reads UA + cookies, clicks the chapter-list icon, reads `select.select-chapter` options as `(value, text)`, closes the driver.
-  - `default_driver_factory(chrome_major: int)` — builds the off-screen `undetected_chromedriver` instance (no visible window).
+  - `harvest_session(site: dict, novel_slug: str, chrome_major: int | None = None, driver_factory) -> SessionData` — opens an off-screen driver, navigates to a chapter page, reads UA + cookies, clicks the chapter-list icon, reads `select.select-chapter` options as `(value, text)`, closes the driver. `chrome_major` is auto-detected when omitted.
+  - `default_driver_factory(chrome_major: int | None)` — builds the off-screen `undetected_chromedriver` instance (no visible window).
+  - `detect_chrome_major() -> int | None` — installed Chrome major version (registry beacon on Windows, `--version` elsewhere), or `None` to let the library auto-detect.
 
 `driver_factory` returns an object with `get(url)`, `execute_script(js)`, `find_elements(by, selector)`, `get_cookies()`, `quit()` (tests inject a stub).
 

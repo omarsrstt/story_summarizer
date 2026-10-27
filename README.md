@@ -67,9 +67,15 @@ uv run python src/scraper.py --engine legacy --website <website_name> --novel <n
      existing chapters are skipped.
    - `refresh-cookies`: (Fast engine) Discard the cached Cloudflare cookie/chapter list and
      re-harvest. Use this if a run starts failing with challenges.
+   - `delay`: (Fast engine) Seconds to pause before each chapter fetch (default: `0`). Use a
+     small value to be gentler on the site. Transient timeouts and 5xx responses are retried
+     automatically with backoff.
 
 The fast engine caches its cookie and chapter list under `.scraper_cache/` (gitignored) and
 re-harvests automatically when a request is challenged.
+
+The browser's Chrome major version is detected automatically (so it keeps working when Chrome
+updates); no manual pin is needed.
 
 ### Summarizing Chapters
 To summarize the scraped chapters, run the `summarizer.py` script:

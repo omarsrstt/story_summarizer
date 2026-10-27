@@ -58,10 +58,13 @@ everything else can be plain HTTP. This is the basis of the design.
 
 ## 6. Constraints
 
-- Target machine: Windows, Chrome **155** currently installed.
-- `undetected_chromedriver` downloads a driver for the *latest* Chrome (156) and
-  **fails** unless pinned via `version_main` — so the fast path must pin the
-  driver version.
+- Target machine: Windows, with a **recent** Chrome (155 when this was written; 156
+  during implementation). The major version is **detected at runtime**
+  (`detect_chrome_major()`), never hardcoded, so moving to a new Chrome does not
+  break the harvest.
+- `undetected_chromedriver` downloads a driver for the *latest* Chrome and
+  **fails** unless pinned via `version_main` — so the fast path pins the driver
+  version to the detected installed major (or defer to auto-detection if unknown).
 - Cookies must handle Cloudflare expiry; a stale cookie returns to the challenge.
 - `curl_cffi` is a **new dependency** (proposed as a `scraper` optional extra).
 - The repo is public; the real `scraper_config.json` stays gitignored.

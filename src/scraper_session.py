@@ -65,6 +65,70 @@ def _is_challenge(body: str) -> bool:
     return _CHALLENGE_MARKER in body.lower()
 
 
+def _parse_major(raw) -> int | None:
+    """First integer in a Chrome version string (``"Google Chrome 156.0.8.48"`` -> ``156``)."""
+
+    import re
+
+    if not raw:
+        return None
+    match = re.search(r"\d+", str(raw))
+    return int(match.group()) if match else None
+
+
+def _windows_chrome_version() -> str | None:
+    """Installed Chrome version from its update beacon (``BLBeacon\\version``)."""
+
+    import winreg
+
+    keys = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Google\Chrome\BLBeacon"),
+    ]
+    for hive, path in keys:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                return winreg.QueryValueEx(key, "version")[0]
+        except OSError:
+            continue
+    return None
+
+
+def _posix_chrome_version() -> str | None:
+    """Installed Chrome version from ``google-chrome --version`` (best effort)."""
+
+    import subprocess
+
+    for exe in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        try:
+            out = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out:
+            return out.strip()
+    return None
+
+
+def detect_chrome_major() -> int | None:
+    """Major version of the installed Chrome, or ``None`` if it cannot be found.
+
+    Pinning ``undetected_chromedriver`` to a wrong major makes it download a
+    mismatched driver and fail to start, so the pin must follow the installed
+    browser. When detection fails we pass ``None`` and let the library
+    auto-detect rather than guess.
+    """
+
+    import sys
+
+    raw = _windows_chrome_version() if sys.platform == "win32" else _posix_chrome_version()
+    return _parse_major(raw)
+
+
 class FastSession:
     """Authorised HTTP session backed by a cached harvest.
 
@@ -142,15 +206,16 @@ class FastSession:
         return build_chapter_map(self._data.chapter_map)
 
 
-def default_driver_factory(chrome_major: int):
+def default_driver_factory(chrome_major: int | None):
     """Build an off-screen, headful undetected-chromedriver instance.
 
     Off-screen (``--window-position=-32000,-32000``) so it never covers the
     screen or takes focus, and headful (``headless=False``) because Cloudflare
     blocks headless Chrome. ``version_main`` is pinned to the installed Chrome
     major version; otherwise undetected-chromedriver downloads a mismatched
-    driver and fails to start. Imports are local so importing this module (and
-    its tests) never requires the browser stack.
+    driver and fails to start. ``None`` defers to the library's auto-detection.
+    Imports are local so importing this module (and its tests) never requires
+    the browser stack.
     """
 
     import undetected_chromedriver as uc
@@ -188,13 +253,17 @@ def _read_options(driver, selector: str) -> list[tuple[str, str]]:
 
 
 def harvest_session(
-    site: dict, novel_slug: str, chrome_major: int, driver_factory=default_driver_factory
+    site: dict,
+    novel_slug: str,
+    chrome_major: int | None = None,
+    driver_factory=default_driver_factory,
 ) -> SessionData:
     """Open an off-screen browser once to pass Cloudflare and list the chapters.
 
     Loads a chapter page, reads the User-Agent and cookies, then opens the
     chapter-list dropdown and reads every ``select.select-chapter`` option. The
-    browser is always closed, even on error.
+    browser is always closed, even on error. When ``chrome_major`` is omitted the
+    installed Chrome version is detected so the driver matches the browser.
     """
 
     import time
@@ -204,6 +273,9 @@ def harvest_session(
     )
     icon_selector = site["chapter_list_icon_selector"]
     list_selector = site["chapter_list_selector"]
+
+    if chrome_major is None:
+        chrome_major = detect_chrome_major()
 
     driver = driver_factory(chrome_major)
     try:

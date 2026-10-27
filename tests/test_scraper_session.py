@@ -196,6 +196,81 @@ def test_empty_cached_map_triggers_reharvest(tmp_path):
     assert calls["harvest"] == 1
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("156.0.8078.48", 156),
+        ("155.0.0.0", 155),
+        ("156", 156),
+        ("  157.1  ", 157),
+        ("", None),
+        (None, None),
+        ("garbage", None),
+        ("Google Chrome", None),
+    ],
+)
+def test_parse_major_from_version(raw, expected):
+    from scraper_session import _parse_major
+
+    assert _parse_major(raw) == expected
+
+
+def test_detect_chrome_major_reads_windows_beacon(monkeypatch):
+    import sys
+
+    import scraper_session
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        scraper_session, "_windows_chrome_version", lambda: "156.0.8078.48"
+    )
+    assert scraper_session.detect_chrome_major() == 156
+
+
+def test_detect_chrome_major_uses_posix_reader_off_windows(monkeypatch):
+    import sys
+
+    import scraper_session
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        scraper_session, "_posix_chrome_version", lambda: "Google Chrome 156.0.1.2"
+    )
+    assert scraper_session.detect_chrome_major() == 156
+
+
+def test_detect_chrome_major_none_when_unknown(monkeypatch):
+    import sys
+
+    import scraper_session
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(scraper_session, "_windows_chrome_version", lambda: None)
+    assert scraper_session.detect_chrome_major() is None
+
+
+def test_harvest_detects_chrome_major_when_not_supplied(monkeypatch):
+    import scraper_session
+    from scraper_session import harvest_session
+
+    monkeypatch.setattr(scraper_session, "detect_chrome_major", lambda: 156)
+    seen = {}
+
+    def factory(major):
+        seen["major"] = major
+        return _StubDriver()
+
+    site = {
+        "base_url": "https://x/",
+        "fast_chapter_url": "https://x/book/{novel_slug}/{slug}",
+        "fast_seed_slug": "chapter-2",
+        "chapter_list_icon_selector": "i",
+        "chapter_list_selector": "select.select-chapter",
+    }
+    harvest_session(site, "novel", driver_factory=factory)
+    assert seen["major"] == 156
+
+
 class _StubOption:
     def __init__(self, v, t):
         self._v, self.text = v, t
