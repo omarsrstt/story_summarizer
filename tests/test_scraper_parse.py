@@ -54,6 +54,52 @@ def test_plausibility_rejects_short_or_challenge_text():
     assert looks_like_chapter("") is False
 
 
+def test_plausibility_accepts_prose_that_mentions_a_moment():
+    """Real chapter text often contains the words "just a moment" (e.g. "for just
+    a moment, the burden ... was lessened"). Matching that phrase rejected a real
+    99KB chapter, so the guard must key on challenge structure, not prose."""
+    prose = (
+        "I grinned despite myself, and for just a moment, the burden of everything "
+        "still waiting for me out there was lessened. " + ("word " * 200)
+    )
+    assert looks_like_chapter(prose) is True
+
+
+def test_is_challenge_detects_real_cloudflare_page():
+    """A genuine Cloudflare interstitial is recognised by its challenge scripts."""
+    from scraper_parse import looks_like_challenge
+
+    real = (
+        "<html><head><title>Just a moment...</title></head><body>"
+        "<script>window._cf_chl_opt={cvId:'3'};</script>"
+        "Enable JavaScript and cookies to continue</body></html>"
+    )
+    assert looks_like_challenge(real) is True
+
+
+def test_is_challenge_ignores_prose_mentioning_a_moment():
+    from scraper_parse import looks_like_challenge
+
+    prose = (
+        "<html><body><div id='content'><p>I grinned, and for just a moment, "
+        "the burden was lessened.</p></div></body></html>"
+    )
+    assert looks_like_challenge(prose) is False
+
+
+def test_is_challenge_ignores_large_page_carrying_cf_platform_script():
+    """Cloudflare injects its challenge-platform script into ordinary pages, so
+    that marker alone must not condemn a real chapter."""
+    from scraper_parse import looks_like_challenge
+
+    page = (
+        "<html><body><div id='content'><p>" + ("word " * 500) + "</p></div>"
+        "<script src='/cdn-cgi/challenge-platform/scripts/jsd/main.js'></script>"
+        "</body></html>"
+    )
+    assert looks_like_challenge(page) is False
+
+
 NESTED = (
     '<div class="txt">'
     "<div><script>ad('" + ("x" * 500) + "')</script></div>"

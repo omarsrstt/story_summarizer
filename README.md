@@ -77,6 +77,35 @@ re-harvests automatically when a request is challenged.
 The browser's Chrome major version is detected automatically (so it keeps working when Chrome
 updates); no manual pin is needed.
 
+#### Harvest modes
+
+Before fetching chapters, the fast engine must learn the chapter list. How it does that is
+per-site, set by the `harvest` key in the site's config entry:
+
+| `harvest` | How the list is obtained | Use when |
+| --- | --- | --- |
+| `"browser"` (default when omitted) | A one-off off-screen browser passes the bot check, then the chapter dropdown and cookies are read out of it | The site challenges plain HTTP requests (e.g. Cloudflare "Just a moment…") |
+| `"paginated"` | Plain HTTP walks the site's paginated chapter index | The site serves its chapter list without a challenge — no browser needed at all |
+
+`"paginated"` needs `chapter_list_page_url` and `chapter_list_link_selector`. Pagination is
+followed in one of two ways, also chosen by config:
+
+- **Numbered pages** — put a `{page}` placeholder in `chapter_list_page_url`
+  (e.g. `https://example.com/novel/{novel_slug}/chapters?page={page}`). Pages are walked
+  upwards until one yields no new chapters.
+- **Next-link chains** — omit `{page}` and set `chapter_list_next_selector` (e.g.
+  `a[rel=next]`) to the link that advances to the following page.
+
+If a paginated site starts challenging requests, the engine stops with an error naming the
+site; switch that entry to `"harvest": "browser"` to go back to passing the challenge once
+with the off-screen browser. It never silently falls back, so a stale config is visible
+instead of mysteriously slow.
+
+Sites that rate-limit bursts (Cloudflare answers with `429` and `Retry-After`) are handled
+automatically: 429 responses are retried with backoff, and a rate-limit page is treated as a
+hard error rather than as "the chapter list ended", so a partial list can never be mistaken
+for a complete one.
+
 ### Summarizing Chapters
 To summarize the scraped chapters, run the `summarizer.py` script:
 

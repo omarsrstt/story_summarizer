@@ -22,12 +22,31 @@ def test_transport_does_not_retry_403_challenge(monkeypatch):
 
     def raw(url, headers, cookies):
         calls["n"] += 1
-        return (403, "Just a moment...")
+        return (403, "<html>Just a moment... but a real challenge</html>")
 
     monkeypatch.setattr(fast, "_raw_transport", raw)
     monkeypatch.setattr(fast.time, "sleep", lambda *_: None)
-    assert fast.default_transport("u", {}, {}) == (403, "Just a moment...")
+    assert fast.default_transport("u", {}, {})[0] == 403
     assert calls["n"] == 1
+
+
+def test_transport_retries_429_then_succeeds(monkeypatch):
+    """Cloudflare rate-limits bursts with 429 + Retry-After; a short page burst
+    must back off and continue rather than fail or truncate the chapter list."""
+    calls = {"n": 0}
+    slept = []
+
+    def raw(url, headers, cookies):
+        calls["n"] += 1
+        return (429, "Access denied") if calls["n"] < 3 else (200, "<html>ok</html>")
+
+    monkeypatch.setattr(fast, "_raw_transport", raw)
+    monkeypatch.setattr(fast.time, "sleep", lambda s: slept.append(s))
+
+    status, body = fast.default_transport("u", {}, {})
+    assert (status, body) == (200, "<html>ok</html>")
+    assert calls["n"] == 3
+    assert slept  # backed off between attempts
 
 
 class _FakeSession:

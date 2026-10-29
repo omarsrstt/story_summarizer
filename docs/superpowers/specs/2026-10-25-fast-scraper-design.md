@@ -207,3 +207,70 @@ All owner-facing questions are now settled (§7.4 numbering, §7.6 no auto-fallb
 2. Validate on a small range; compare against legacy output.
 3. Flip default to fast; README documents both engines and the fallback.
 4. (Separate) commit the pending summarizer/env work — unaffected by this work.
+
+## 11. Addendum — harvest is pluggable (2026-10-29)
+
+**What changed on the sites.** The Cloudflare-protected site that motivated §2 went
+down and returned at a new domain, and the domain the config pointed at began
+serving a JS "Loading…" redirect stub instead of pages. A different host serving the
+same novel is reachable over plain HTTP with no bot check at all, and exposes a
+paginated chapter index. So the *browser-once-then-HTTP* model is still right, but
+"harvest the chapter list" must not be hardwired to a dropdown in a browser.
+
+**Design.** The harvest step — "produce the ordered list of (slug, title)" — is
+selected per site by a `harvest` key:
+
+| `harvest` | Implementation | Cost |
+| --- | --- | --- |
+| `"browser"` (default when the key is absent) | §2's path: off-screen Chrome, pass the check, read `select.select-chapter` and cookies | ~30 s, needs Chrome |
+| `"paginated"` | Plain `curl_cffi` walk of the chapter index | ~13 s, no browser |
+
+Both return the same `SessionData`, so **nothing downstream changes**: the cookie
+cache, `chapter_map()`, skip-existing, the plausibility guard and the atomic writer
+are shared. The browser path is preserved verbatim — when the protected site is
+reachable again, switching its entry back to `"browser"` restores the original
+behaviour with no code change.
+
+**Pagination style is configuration, not inference.** A `{page}` placeholder in
+`chapter_list_page_url` means numbered pages: walk upward until a page contributes no
+new slugs. Otherwise `chapter_list_next_selector` is followed as a next-link chain.
+Guessing between the two was rejected — a wrong guess terminates the walk on page 1
+and looks like a short novel.
+
+**No automatic fallback (consistent with §7.6).** If a paginated site starts
+challenging, the run fails with an error naming the site and telling the operator to
+set `"harvest": "browser"`. Silently opening a browser would hide a stale config and
+pay the 30 s cost invisibly.
+
+### 11.1 Two bugs found while verifying against the live site
+
+- **Challenge false positive.** Challenge detection was the bare substring
+  `"just a moment"`. Chapter prose contains that phrase, so a genuine 99 KB chapter
+  was classified as an interstitial and rejected. Markers were probed against live
+  pages: `challenge-platform` appears on *ordinary* pages too (Cloudflare injects it
+  everywhere) and is unusable; `_cf_chl_opt`, `cf-browser-verification` and
+  "enable javascript and cookies to continue" appear only on real challenges.
+  Detection now keys on those structural markers.
+- **Silent list truncation.** The site throttles bursts with `429` + `Retry-After:
+  10` after roughly five rapid list pages. The transport returned 429 immediately,
+  and the walker read "a page with no new links" as end-of-list — producing a
+  complete-looking map of 400 chapters. That is worse than a failure, because later
+  runs would skip chapters as "not in the site's list". Now 429 is retried with
+  bounded backoff, and a non-200 list page is a hard error.
+
+**Lesson recorded:** in any list-walking code, "no items found" must never be the
+same branch as "the list ended". Distinguish "the page was read and was empty"
+from "the page could not be read".
+
+### 11.2 Verification evidence (2026-10-29)
+
+- Full paginated harvest: 529 chapters in 13 s, including one automatic 429 backoff.
+- Corpus gap chapters 510–512 scraped in 0.9 s, titles and head/tail intact.
+- Browser harvest on the protected site still returns 533 options (~32 s), and its
+  chapters still fetch and extract — the preserved path remains working.
+- Parity spot-check against existing corpus text: `SequenceMatcher` ratio 0.9926,
+  0.9959 by body lines; the only difference is two junk trailer lines present in the
+  old corpus files.
+- Corpus complete afterwards: 516 chapters, 1–516, no gaps.
+- Suite: 77 passed.
+

@@ -18,6 +18,7 @@ from scraper_session import (
     ChallengeError,
     FastSession,
     SessionCache,
+    harvest_paginated,
     harvest_session,
 )
 from scraper_store import existing_chapter, write_chapter
@@ -30,6 +31,12 @@ CACHE_DIRNAME = ".scraper_cache"
 # alone: FastSession decides whether it is a challenge (refresh) or rate-limiting.
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE = 0.5
+
+# Cloudflare answers a burst of requests with 429 + `Retry-After` (observed: 10s
+# after ~5 quick list pages). Long enough to clear it, bounded so a hard block
+# still fails promptly.
+_RATE_LIMIT_MAX_ATTEMPTS = 4
+_RATE_LIMIT_BASE = 10.0
 
 
 def chapter_url(site: dict, novel_slug: str, slug: str) -> str:
@@ -64,17 +71,28 @@ def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]
     """Fetch ``url`` with curl_cffi, retrying transient failures with backoff.
 
     A timeout (status 0) or a 5xx is retried up to ``_MAX_ATTEMPTS`` times with
-    exponential backoff. Other statuses (including a 403, which may be a
-    Cloudflare challenge) are returned immediately so ``FastSession`` can react.
+    exponential backoff. A 429 (Cloudflare rate limiting) is retried more
+    patiently, since the site advertises a ~10s ``Retry-After`` when it throttles
+    a burst. Other statuses (including a 403, which may be a Cloudflare
+    challenge) are returned immediately so ``FastSession`` can react.
     """
 
     status, body = 0, ""
-    for attempt in range(_MAX_ATTEMPTS):
+    attempts = 0
+    rate_attempts = 0
+    while attempts < _MAX_ATTEMPTS:
         status, body = _raw_transport(url, headers, cookies)
+        if status == 429:
+            rate_attempts += 1
+            if rate_attempts >= _RATE_LIMIT_MAX_ATTEMPTS:
+                return status, body
+            time.sleep(_RATE_LIMIT_BASE * rate_attempts)
+            continue
         if status != 0 and status < 500:
             return status, body
-        if attempt < _MAX_ATTEMPTS - 1:
-            time.sleep(_BACKOFF_BASE * (2**attempt))
+        attempts += 1
+        if attempts < _MAX_ATTEMPTS:
+            time.sleep(_BACKOFF_BASE * (2 ** (attempts - 1)))
     return status, body
 
 
@@ -97,10 +115,19 @@ def make_session(
     if refresh:
         cache_path.unlink(missing_ok=True)
 
-    def harvest():
-        return harvest_session(site, novel_slug, chrome_major)
+    if site.get("harvest") == "paginated":
 
-    return FastSession(site, novel_slug, SessionCache(cache_path), default_transport, harvest)
+        def harvest():
+            return harvest_paginated(site, novel_slug, default_transport)
+
+    else:
+
+        def harvest():
+            return harvest_session(site, novel_slug, chrome_major)
+
+    return FastSession(
+        site, novel_slug, SessionCache(cache_path), default_transport, harvest
+    )
 
 
 def run_fast(

@@ -5,6 +5,14 @@ import pytest
 from scraper_parse import ChapterRef
 from scraper_session import ChallengeError, FastSession
 
+# A genuine Cloudflare interstitial: the visible title plus the challenge config
+# script. Only the structural markers identify it — the title phrase alone occurs
+# in chapter prose.
+CHALLENGE = (
+    "<html><head><title>Just a moment...</title></head>"
+    "<body><script>window._cf_chl_opt={};</script></body></html>"
+)
+
 
 def test_roundtrip(tmp_path):
     cache = SessionCache(tmp_path / "c.json")
@@ -60,7 +68,7 @@ def test_fetch_refreshes_once_then_succeeds(tmp_path):
 
     def transport(u, h, c):
         calls["n"] += 1
-        return (200, "Just a moment...") if calls["n"] == 1 else (200, "<html>real</html>")
+        return (200, CHALLENGE) if calls["n"] == 1 else (200, "<html>real</html>")
 
     def harvest():
         calls["harvest"] += 1
@@ -78,7 +86,7 @@ def test_fetch_gives_up_after_one_refresh(tmp_path):
         calls["harvest"] += 1
         return SessionData("UA", {"cf_clearance": "new"}, [])
 
-    s = _seeded_session(lambda u, h, c: (403, "Just a moment..."), harvest, tmp_path)
+    s = _seeded_session(lambda u, h, c: (403, CHALLENGE), harvest, tmp_path)
     with pytest.raises(ChallengeError):
         s.fetch("https://x/book/novel/chapter-2")
     assert calls["harvest"] == 1
@@ -95,7 +103,7 @@ def test_concurrent_challenge_refreshes_once(tmp_path):
     def transport(u, h, c):
         barrier.wait()  # keep all four requests in flight together
         if c.get("cf_clearance") == "old":
-            return (200, "Just a moment...")
+            return (200, CHALLENGE)
         return (200, "<html>real</html>")
 
     def harvest():
@@ -139,6 +147,71 @@ def test_fetch_does_not_swallow_non_challenge_body(tmp_path):
     assert "not found" in s.fetch("https://x/book/novel/chapter-2")
 
 
+def test_block_detection_ignores_prose_saying_access_denied(tmp_path):
+    """\"access denied\" is ordinary English; a chapter using it must not be
+    rejected as a Cloudflare block page."""
+    body = (
+        "<html><body><div id='content'><p>Her request was met with access "
+        "denied, and the gates stayed shut.</p></div></body></html>"
+    )
+    s = _seeded_session(lambda u, h, c: (200, body), lambda: None, tmp_path)
+    assert s.fetch("https://x/book/novel/chapter-2") == body
+
+
+def test_fetch_reports_a_blocked_chapter_clearly(tmp_path):
+    """A rate-limited or blocked chapter must say so, not masquerade as
+    \"did not look like a chapter\"."""
+    blocked = (
+        "<html><head><title>Access denied | x used Cloudflare to restrict "
+        "access</title></head><body>Access denied</body></html>"
+    )
+    s = _seeded_session(lambda u, h, c: (429, blocked), lambda: None, tmp_path)
+    with pytest.raises(ChallengeError) as exc:
+        s.fetch("https://x/book/novel/chapter-2")
+    assert "chapter-2" in str(exc.value)
+
+
+def test_fetch_does_not_treat_prose_as_a_challenge(tmp_path):
+    """A real chapter whose prose says "for just a moment" must be returned as-is
+    instead of triggering a pointless cookie refresh."""
+    calls = {"harvest": 0}
+    body = (
+        "<html><body><div id='content'><p>I grinned, and for just a moment, "
+        "the burden was lessened.</p></div></body></html>"
+    )
+
+    def harvest():
+        calls["harvest"] += 1
+        return SessionData("UA2", {"cf_clearance": "new"}, [])
+
+    s = _seeded_session(lambda u, h, c: (200, body), harvest, tmp_path)
+    assert s.fetch("https://x/book/novel/chapter-2") == body
+    assert calls["harvest"] == 0
+
+
+def test_paginated_session_does_not_reharvest_on_challenge(tmp_path):
+    """In paginated mode there are no cookies to renew, so a challenged chapter
+    must fail fast rather than re-walk the whole chapter index."""
+    calls = {"harvest": 0}
+
+    def harvest():
+        calls["harvest"] += 1
+        return SessionData("", {}, [("chapter-2", "Chapter 1: X")])
+
+    challenge = "<html><title>Just a moment...</title>window._cf_chl_opt={}</html>"
+    s = FastSession(
+        {"base_url": "https://x/", "harvest": "paginated"},
+        "novel",
+        SessionCache(tmp_path / "c.json"),
+        lambda u, h, c: (403, challenge),
+        harvest,
+    )
+    with pytest.raises(ChallengeError):
+        s.fetch("https://x/book/novel/chapter-2")
+    # one harvest to build the map; no second one triggered by the challenge
+    assert calls["harvest"] == 1
+
+
 def test_fetch_sends_cached_user_agent(tmp_path):
     seen = {}
 
@@ -168,7 +241,7 @@ def test_refresh_preserves_map_when_harvest_returns_empty(tmp_path):
     # A transient harvest failure (a fresh cookie but no chapter list) must not
     # wipe the good cached map, or every later run finds nothing to fetch.
     def transport(u, h, c):
-        return (403, "Just a moment...") if c.get("cf_clearance") == "old" else (200, "<html>real</html>")
+        return (403, CHALLENGE) if c.get("cf_clearance") == "old" else (200, "<html>real</html>")
 
     def harvest():
         return SessionData("UA2", {"cf_clearance": "new"}, [])  # empty list

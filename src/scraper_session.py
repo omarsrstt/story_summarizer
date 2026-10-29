@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scraper_parse import CHALLENGE_MARKER, ChapterRef, build_chapter_map
+from scraper_parse import ChapterRef, build_chapter_map, looks_like_challenge
 
 
 class ChallengeError(Exception):
@@ -58,11 +58,31 @@ class SessionCache:
         )
 
 
-_CHALLENGE_MARKER = CHALLENGE_MARKER
-
-
 def _is_challenge(body: str) -> bool:
-    return _CHALLENGE_MARKER in body.lower()
+    """Structural challenge test (see ``looks_like_challenge``).
+
+    Deliberately not a "just a moment" substring match: chapter prose contains
+    that phrase and must never be mistaken for a challenge page.
+    """
+
+    return looks_like_challenge(body)
+
+
+# Cloudflare's block page ("Access denied | <host> used Cloudflare to restrict
+# access") carries none of the interactive-challenge markers, so it needs its own
+# test. It is a hard refusal: never a chapter, and never the end of a chapter list.
+#
+# Only Cloudflare-specific phrasing is listed. A bare "access denied" is ordinary
+# English and could appear in chapter prose — the same trap as "just a moment".
+_BLOCK_MARKERS = (
+    "used cloudflare to restrict access",
+    "attention required! | cloudflare",
+)
+
+
+def _is_blocked(body: str) -> bool:
+    lowered = body.lower()
+    return any(marker in lowered for marker in _BLOCK_MARKERS)
 
 
 def _parse_major(raw) -> int | None:
@@ -180,16 +200,41 @@ class FastSession:
         headers = {"User-Agent": data.user_agent} if data.user_agent else {}
         return self._transport(url, headers, dict(data.cookies))
 
+    def _can_refresh(self) -> bool:
+        """Whether a cookie refresh can plausibly help.
+
+        In paginated (plain-HTTP) mode there are no cookies to renew, so
+        re-walking the chapter index cannot fix a challenged request; failing
+        fast avoids fetching the whole list again for every blocked chapter.
+        """
+
+        return self.site.get("harvest") != "paginated"
+
     def fetch(self, url: str) -> str:
         """Return the page body, refreshing cookies once if challenged."""
 
         data = self._ensure_data()
         status, body = self._get(url, data)
         if _is_challenge(body):
+            if not self._can_refresh():
+                raise ChallengeError(
+                    f"challenge persisted for {url}; this site uses plain-HTTP "
+                    "harvesting and has no cookies to refresh. If it now "
+                    'requires Cloudflare clearance, set "harvest": "browser" in '
+                    "its config entry."
+                )
             data = self._refresh(data)
             status, body = self._get(url, data)
             if _is_challenge(body):
                 raise ChallengeError(f"challenge persisted for {url}")
+        elif _is_blocked(body):
+            # Reported separately from a challenge: no cookie refresh can help,
+            # and it must not be mistaken for chapter text that failed to parse.
+            raise ChallengeError(
+                f"{url} was refused by Cloudflare (HTTP {status}"
+                + (", rate limited" if status == 429 else "")
+                + "); retry later or with fewer parallel requests."
+            )
         return body
 
     def chapter_map(self) -> dict[int, ChapterRef]:
@@ -204,6 +249,98 @@ class FastSession:
                 if not self._data.chapter_map:
                     self._store_harvest(self._data)
         return build_chapter_map(self._data.chapter_map)
+
+
+def harvest_paginated(site: dict, novel_slug: str, transport) -> SessionData:
+    """List chapters over plain HTTP by walking a paginated chapter index.
+
+    For sites whose chapter list is server-rendered and public (no Cloudflare
+    challenge on plain requests). Fetches the configured list page, collects
+    ``(slug, title)`` from the configured link selector, and then walks the
+    remaining pages. **Never opens a browser.**
+
+    Two walk styles are supported, chosen by the config template:
+
+    * ``chapter_list_page_url`` contains ``{page}`` -> the walk increments the
+      page number until a page yields nothing new. Needed for sites that expose
+      numbered pages but no "next" link (and that silently repeat their last
+      page for out-of-range numbers).
+    * otherwise ``{page}`` is absent -> the walk follows the
+      ``chapter_list_next_selector`` link until it is exhausted.
+
+    Raises :class:`ChallengeError` — never returns an empty map — when the site
+    challenges plain requests, so the operator can switch the site to
+    ``harvest: browser`` in the config.
+    """
+
+    from urllib.parse import urljoin
+
+    from bs4 import BeautifulSoup
+
+    template = site["chapter_list_page_url"]
+    link_selector = site["chapter_list_link_selector"]
+    next_selector = site.get("chapter_list_next_selector")
+    numbered = "{page}" in template
+
+    first_url = template.format(novel_slug=novel_slug, page=1)
+    max_pages = 200  # hard stop: a misconfigured site must not walk forever
+
+    entries: list[tuple[str, str]] = []
+    seen_slugs: set[str] = set()
+    seen_pages: set[str] = set()
+    url: str | None = first_url
+    page = 1
+
+    while url and url not in seen_pages and page <= max_pages:
+        seen_pages.add(url)
+        status, body = transport(url, {}, {})
+        if status != 200 or _is_challenge(body) or _is_blocked(body):
+            raise ChallengeError(
+                f"chapter list for {novel_slug} at {url} could not be read "
+                f"(HTTP {status}"
+                + (", Cloudflare rate limit" if status == 429 else "")
+                + "): plain-HTTP harvesting is unavailable for this site. "
+                + (
+                    "Wait a minute and retry with fewer chapters per run."
+                    if status == 429
+                    else 'Set "harvest": "browser" in its config entry to use the '
+                    "off-screen browser harvest instead."
+                )
+            )
+        soup = BeautifulSoup(body, "html.parser")
+        new_this_page = 0
+        for a in soup.select(link_selector):
+            href = a.get("href") or ""
+            if not href:
+                continue
+            title = (a.get("title") or a.get_text() or "").strip()
+            if not title:
+                continue
+            slug = href.rstrip("/").rsplit("/", 1)[-1]
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+            entries.append((slug, title))
+            new_this_page += 1
+
+        if numbered:
+            # A page with no new slugs means the index is exhausted: either the
+            # page is empty or the site repeated the previous page verbatim.
+            if not new_this_page:
+                break
+            page += 1
+            url = template.format(novel_slug=novel_slug, page=page)
+        else:
+            nxt = soup.select_one(next_selector) if next_selector else None
+            url = urljoin(url, nxt.get("href")) if nxt and nxt.get("href") else None
+
+    if not entries:
+        raise ChallengeError(
+            f"no chapter links found on the chapter list for {novel_slug} "
+            f"at {first_url}; check the site's chapter_list_link_selector."
+        )
+
+    return SessionData(user_agent="", cookies={}, chapter_map=entries)
 
 
 def default_driver_factory(chrome_major: int | None):

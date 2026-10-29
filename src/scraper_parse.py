@@ -22,9 +22,28 @@ from bs4 import BeautifulSoup
 
 _NUMBER_RE = re.compile(r"chapter\s+(\d+)", re.IGNORECASE)
 
-# Substring of a Cloudflare interstitial body; shared so the challenge check and
-# the plausibility guard cannot drift apart.
-CHALLENGE_MARKER = "just a moment"
+# Structural markers of a Cloudflare interstitial. Chosen because they never
+# appear in chapter prose or on ordinary pages: Cloudflare injects its
+# ``challenge-platform`` script into *normal* pages too, and the visible title
+# "Just a moment..." is imitated by novel prose ("for just a moment, ...").
+_CHALLENGE_MARKERS = (
+    "_cf_chl_opt",  # config object of the challenge page
+    "cf-browser-verification",
+    "enable javascript and cookies to continue",
+)
+
+
+def looks_like_challenge(body: str) -> bool:
+    """True only for a genuine bot-challenge page, judged by its scripts.
+
+    A real Cloudflare challenge is detected by the presence of its challenge
+    config/verification markers. Matching the literal phrase "just a moment"
+    would reject legitimate chapter prose that uses those words, so the phrase
+    alone is not sufficient.
+    """
+
+    lowered = body.lower()
+    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -101,7 +120,7 @@ def looks_like_chapter(text: str, min_chars: int = 400) -> bool:
 
     if len(text) < min_chars:
         return False
-    if CHALLENGE_MARKER in text.lower():
+    if looks_like_challenge(text):
         return False
     return True
 
