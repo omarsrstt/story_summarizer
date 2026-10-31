@@ -15,6 +15,31 @@ import torch
 import torch.nn.functional as F
 
 
+def resolve_entry(config: Dict, model_name: str) -> Dict:
+    """Return a model's config entry with its prompt set merged in.
+
+    Prompts can live in one shared ``prompts`` block (so several models are
+    measured against identical wording) or inline on the entry, which is the
+    older form and still works. Raising a clear error beats the bare
+    ``KeyError`` a direct dict lookup would give for an unknown model name.
+    """
+
+    entries = config["model_config"]
+    if model_name not in entries:
+        known = ", ".join(sorted(entries))
+        raise KeyError(f"Unknown model '{model_name}'. Configured models: {known}")
+
+    entry = dict(entries[model_name])
+    set_name = entry.get("prompt_set")
+    if set_name:
+        sets = config.get("prompts", {})
+        if set_name not in sets:
+            known = ", ".join(sorted(sets)) or "none"
+            raise KeyError(f"Unknown prompt_set '{set_name}'. Available: {known}")
+        entry = {**sets[set_name], **entry}
+    return entry
+
+
 class LocalNovelSummarizer:
     def __init__(self,
                  novel_name: str, 
@@ -28,6 +53,9 @@ class LocalNovelSummarizer:
         self.summaries_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config["save_dir"], novel_name)
         self.model_name = model_name
         self.config = config
+        # Prompt settings may be shared through ``prompts``; resolve once here
+        # so the rest of the class can read a single flat entry.
+        self.model_config = resolve_entry(config, model_name)
         # self.max_new_tokens = 1024
         
         # Create summaries directory if it doesn't exist
@@ -59,7 +87,7 @@ class LocalNovelSummarizer:
     def _load_model_and_tokenizer(self):
         """Load model with optimizations for faster inference."""
 
-        quantization_info = self.config["model_config"][self.model_name]["quantization"]
+        quantization_info = self.model_config["quantization"]
         if quantization_info["type"]:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit = quantization_info["load_in_4bit"],  # Enable 4-bit quantization
@@ -74,7 +102,7 @@ class LocalNovelSummarizer:
                                             # use_sdpa=False
                                             )
         # Initialize model
-        if self.config["model_config"][self.model_name]["type"] == "seq2seq":
+        if self.model_config["type"] == "seq2seq":
             self.model = AutoModelForSeq2SeqLM.from_pretrained(
                 self.model_name,
                 device_map = self.config["DEVICE"],
@@ -110,7 +138,7 @@ class LocalNovelSummarizer:
         as a raw completion. This is opt-in per model config entry so that
         existing completion-style entries keep working exactly as before.
         """
-        return bool(self.config["model_config"][self.model_name].get("chat_template"))
+        return bool(self.model_config.get("chat_template"))
 
     def extract_chapter_number(self, filename):
         """Extract chapter number from filename."""
@@ -167,7 +195,7 @@ class LocalNovelSummarizer:
             # Record start time
             start_time = time.time()
             
-            generation_config = self.config["model_config"][self.model_name]["generation"]
+            generation_config = self.model_config["generation"]
             # Generate with optimized parameters
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -241,7 +269,7 @@ class LocalNovelSummarizer:
             inputs = self.tokenizer(batch_prompts, return_tensors="pt", padding=True).to(self.device)
             
             # Generate summaries for the batch
-            generation_config = self.config["model_config"][self.model_name]["generation"]
+            generation_config = self.model_config["generation"]
             with torch.no_grad():
                 outputs = self.model.generate(
                     inputs["input_ids"],
@@ -301,7 +329,7 @@ class LocalNovelSummarizer:
     def generate_summary_for_chunk(self, chunk, chapter_range, progress_bar=None):
         """Generate summary for a specific text chunk."""
         
-        prompt_template = self.config["model_config"][self.model_name].get("prompt_template")
+        prompt_template = self.model_config.get("prompt_template")
         if prompt_template:
             # {chapter_range}/{novel} are optional placeholders for templates
             # that state the source up front (matching the prompt the spike
@@ -317,7 +345,7 @@ class LocalNovelSummarizer:
             {chunk}
             """
         
-        system_prompt = self.config["model_config"][self.model_name].get("system_prompt")
+        system_prompt = self.model_config.get("system_prompt")
         summary = self._generate_text(prompt, progress_bar=progress_bar, system_prompt=system_prompt)
         return summary
     
@@ -331,7 +359,7 @@ class LocalNovelSummarizer:
         
         # Chunk the content
         chunks = self.chunk_text(chapters_content, 
-                                 max_tokens=self.config["model_config"][self.model_name]["chunk_size"])
+                                 max_tokens=self.model_config["chunk_size"])
         
         with tqdm(total=len(chunks), desc=f"Processing chunks for {chapter_range}") as chunk_bar:
             if len(chunks) == 1:
@@ -369,7 +397,7 @@ class LocalNovelSummarizer:
             # The merge step is config-driven so that a model with fidelity
             # rules does not silently lose them here (the default text below
             # asks for a "cohesive summary" and would happily editorialize).
-            meta_prompt_template = self.config["model_config"][self.model_name].get("meta_prompt_template")
+            meta_prompt_template = self.model_config.get("meta_prompt_template")
             if meta_prompt_template:
                 meta_prompt = meta_prompt_template.format(
                     chapter_range=chapter_range,
@@ -390,7 +418,7 @@ class LocalNovelSummarizer:
                 <unified_summary>
                 """
 
-            system_prompt = self.config["model_config"][self.model_name].get("system_prompt")
+            system_prompt = self.model_config.get("system_prompt")
             meta_summary = self._generate_text(meta_prompt, progress_bar=meta_bar, system_prompt=system_prompt)
             meta_bar.update(1)
             

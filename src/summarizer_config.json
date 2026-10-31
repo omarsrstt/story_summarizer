@@ -2,13 +2,100 @@
     "CHAPTER_GROUP_SIZE": 1,
     "BATCH_SIZE": 1,
     "NOVEL_DIR": "novels",
+    "MODEL_DIR": "S:/Programming/models",
+    "LLAMA_BINARY": "tools/llama/bin/llama-server.exe",
     "MAX_LENGTH": 1024,
     "novel": null,
-    "model": "Qwen/Qwen3-4B-Instruct-2507",
-    "chapters": "150-200",
+    "model": "qwen3.5-9b",
+    "chapters": "all",
     "save_dir": "summaries",
+    "digest": {
+        "batch_size": 12,
+        "max_new_tokens": 2048,
+        "digest_file": "digest.txt"
+    },
+    "master": {
+        "fan_in": 20,
+        "target_words": 600
+    },
+    "prompts": {
+        "recap_faithful": {
+            "system_prompt": "You are writing a faithful recap of a group of novel chapters.\n\nWrite a chronological recap of what actually happens in the excerpt. Let the length follow the material: cover what is there and no more. Three to six paragraphs is typical.\n\nRules:\n1. Include only events, characters, and details that appear in the excerpt. Add nothing that is not there.\n2. Report what happens; do not interpret it. No thematic commentary, and no phrases like \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n3. The excerpt may end in the middle of a scene. If it does, end the recap at that same point. Do not resolve, complete, or continue past the last event in the excerpt.\n4. Use characters' names explicitly; avoid bare pronouns where a name is clearer.\n5. Embed important dialogue in the narrative rather than listing quotes separately.\n6. No headings, no bullet points, no separate \"analysis\" or \"dialogue breakdown\" sections.\n7. Never refer to your own source: no \"the excerpt\", \"the chapter\", \"the text\", \"the passage\", or \"this section\", and no saying where anything ends. State the events themselves, as if telling a reader what happened in the story.",
+            "prompt_template": "Summarize the following excerpt from {chapter_range} of the novel \"{novel}\".\n\n### Excerpt:\n{chapter}\n\n### Recap:",
+            "meta_prompt_template": "Merge the following partial recaps of {chapter_range} of the novel \"{novel}\" into one continuous, chronological recap. Preserve what they contain, including names and concrete detail; add nothing that is not in them, and do not interpret or editorialize.\n\nPartial recaps:\n{summaries}\n\nMerged recap:"
+        },
+        "digest": {
+            "system_prompt": "You are compressing chapter recaps into a skim-reading digest for someone returning to a long novel after years away.\n\nYou will be given a batch of numbered chapters. Write exactly one line per chapter, in the form:\n\nChapter 7: First thing that happened. Second thing that happened.\n\nRules:\n1. One or two sentences per chapter, never more. This is a reminder, not a recap.\n2. Lead with the events that a reader would need in order to follow later chapters: who did what, who died, what changed, what was revealed, where anyone went.\n3. Name characters instead of using pronouns. A returning reader does not remember who \"he\" is; a name they have forgotten is still more useful because it can be looked up and because it says a person was involved.\n4. Say what happened, not what it meant. No themes, no interpretation, no \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n5. Keep the chapter number exactly as given, one line each, in order. Do not skip a chapter, and do not merge two chapters into one line.\n6. Add nothing that is not in the recaps.",
+            "prompt_template": "Write the digest lines for these chapters of \"{novel}\".\n\n{chapter}\n\nDigest:"
+        },
+        "merge": {
+            "system_prompt": "You are merging recaps of consecutive chapters of a novel into one continuous summary.\n\nRules:\n1. Write flowing narrative prose, chronological, in three to six paragraphs.\n2. Keep what matters: major events, decisions, deaths, discoveries, who went where and why, and the names of the people involved. Drop repeated detail and minor exchanges.\n3. Use characters' names explicitly rather than bare pronouns.\n4. Report what happens; do not interpret it. No thematic commentary, and no phrases like \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n5. Add nothing that is not in the recaps you are given.\n6. No headings, no bullet points, no chapter-by-chapter list.",
+            "prompt_template": "Merge these recaps of {chapter_range} of the novel \"{novel}\" into one summary.\n\n### Recaps:\n{summaries}\n\n### Summary:"
+        },
+        "master": {
+            "system_prompt": "You are compressing a long novel into a single continuous summary, for a reader who has been away for years and wants the whole story in one sitting.\n\nRules:\n1. Write flowing narrative prose in chronological order. No headings, no bullet points, no chapter-by-chapter list.\n2. Keep the spine of the story: who the central characters are, what they want, the major conflicts, who dies, what is revealed, and how each stage leads into the next.\n3. Drop detail that does not change the course of the story. Where the inputs repeat themselves or overlap, merge them into one statement.\n4. Use characters' names explicitly rather than bare pronouns.\n5. Report what happens; do not interpret it. No thematic commentary, and no phrases like \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n6. Add nothing that is not in the recaps you are given, and do not invent links between events that the recaps do not state.",
+            "prompt_template": "Compress these recaps of {chapter_range} of the novel \"{novel}\" into one continuous summary of about {target_words} words. Finish the last sentence; do not trail off.\n\n### Recaps:\n{summaries}\n\n### Summary:"
+        }
+    },
     "model_config":{
+        "qwen3.5-9b": {
+            "backend": "gguf",
+            "gguf_file": "Qwen3.5-9B-Q4_K_M.gguf",
+            "type": "causal",
+            "prompt_set": "recap_faithful",
+            "chunk_size": 12000,
+            "n_ctx": 12288,
+            "n_gpu_layers": 999,
+            "reasoning": false,
+            "generation": {
+                "max_new_tokens": 1400,
+                "temperature": 0.0
+            }
+        },
+        "qwen3.5-4b": {
+            "backend": "gguf",
+            "gguf_file": "Qwen3.5-4B-Q4_K_M.gguf",
+            "type": "causal",
+            "prompt_set": "recap_faithful",
+            "chunk_size": 12000,
+            "n_ctx": 12288,
+            "n_gpu_layers": 999,
+            "reasoning": false,
+            "generation": {
+                "max_new_tokens": 1400,
+                "temperature": 0.0
+            }
+        },
+        "ministral3-8b": {
+            "backend": "gguf",
+            "gguf_file": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+            "type": "causal",
+            "prompt_set": "recap_faithful",
+            "chunk_size": 12000,
+            "n_ctx": 12288,
+            "n_gpu_layers": 999,
+            "reasoning": false,
+            "generation": {
+                "max_new_tokens": 1400,
+                "temperature": 0.0
+            }
+        },
+        "gemma4-e4b": {
+            "backend": "gguf",
+            "gguf_file": "gemma-4-E4B-it-Q4_K_M.gguf",
+            "type": "causal",
+            "prompt_set": "recap_faithful",
+            "chunk_size": 12000,
+            "n_ctx": 12288,
+            "n_gpu_layers": 999,
+            "reasoning": false,
+            "generation": {
+                "max_new_tokens": 1400,
+                "temperature": 0.0
+            }
+        },
         "Qwen/Qwen3-4B-Instruct-2507": {
+            "prompt_set": "recap_faithful",
             "chunk_size": 12000,
             "type" : "causal",
             "chat_template": true,
@@ -29,10 +116,7 @@
                 "do_sample": false,
                 "no_repeat_ngram_size": 3,
                 "num_beams": 1
-            },
-            "system_prompt": "You are writing a faithful recap of a group of novel chapters.\n\nWrite a chronological recap of what actually happens in the excerpt. Let the length follow the material: cover what is there and no more. Three to six paragraphs is typical.\n\nRules:\n1. Include only events, characters, and details that appear in the excerpt. Add nothing that is not there.\n2. Report what happens; do not interpret it. No thematic commentary, and no phrases like \"turning point\", \"destiny\", \"foreshadowing\", \"a testament to\", or \"not just X, but Y\".\n3. The excerpt may end in the middle of a scene. If it does, end the recap at that same point. Do not resolve, complete, or continue past the last event in the excerpt.\n4. Use characters' names explicitly; avoid bare pronouns where a name is clearer.\n5. Embed important dialogue in the narrative rather than listing quotes separately.\n6. No headings, no bullet points, no separate \"analysis\" or \"dialogue breakdown\" sections.",
-            "prompt_template": "Summarize the following excerpt from {chapter_range} of the novel \"{novel}\".\n\n### Excerpt:\n{chapter}\n\n### Recap:",
-            "meta_prompt_template": "Merge the following partial recaps of {chapter_range} of the novel \"{novel}\" into one continuous, chronological recap. Preserve what they contain, including names and concrete detail; add nothing that is not in them, and do not interpret or editorialize.\n\nPartial recaps:\n{summaries}\n\nMerged recap:"
+            }
         },
         "Qwen/Qwen2.5-7B-Instruct-1M": {
             "chunk_size": 15000,
