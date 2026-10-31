@@ -159,16 +159,45 @@ It is deliberately a tool you run, not something applied while scraping, so it n
 text it does not understand.
 
 ### Summarizing Chapters
-To summarize the scraped chapters, run the `summarizer.py` script:
+Use `src/summarize.py`. It drives `llama-server` (llama.cpp) with a GGUF model instead of loading
+weights in-process, which is roughly 6x faster on an 8 GB card and lets the model be unloaded to
+free VRAM afterwards.
 
 ```bash
-python summarizer.py --novel <novel_name> --model <model_name> --group-size <group_size> --chapters <chapter_selection>
+uv run python src/summarize.py -n <novel_name>
 ```
 
-   - `novel`: The name of the novel to summarize.
-   - `model`: (Optional) The NLP model to use for summarization (default: `Qwen/Qwen3-4B-Instruct-2507`).
-   - `group-size`: (Optional) The number of chapters to group together for summarization (default: 1).
-   - `chapters`: (Optional) Specific chapters or ranges to summarize (e.g., 1,3-5,7).
+   - `-n`, `--novel`: the novel directory name under `novels/` (required).
+   - `-m`, `--model`: model key from `src/summarizer_config.json` (default: `qwen3.5-9b`).
+   - `-c`, `--chapters`: `all`, `recent`, `5`, `1-20`, `1,3-5` (default: all).
+   - `--overwrite`: regenerate summaries that already exist.
+   - `--dry-run`: print the plan without loading the model.
 
-Model behaviour (quantization, generation parameters, and the summary prompt) is configured per
-model in `src/summarizer_config.json`.
+Recaps resume by default: a chapter that already has a non-empty
+`summaries/<slug>/summary_chapter_NNNNN.txt` is skipped. A chapter whose prompt would overflow
+`n_ctx` is refused rather than summarized from its opening pages only.
+
+#### Wider artifacts
+Three additional artifacts are built from the per-chapter recaps — never from the source, so any
+of them can be rebuilt at a different width without re-reading the novel:
+
+| Flag | Output | What it is |
+| --- | --- | --- |
+| `-g N`, `--group-size N` | `summary_chapters_00001-00005.txt` | one summary per N chapters |
+| `--digest` | `digest.txt` | `Chapter 7: event. event.` — one or two sentences per chapter |
+| `--all`, `--master` | `master_summary.txt` | whole-novel summary, compressed in rounds |
+
+The recaps must be generated **first** — these steps read them rather than the chapters, and a
+missing recap in the selected range is an error rather than a silent gap. After that the flags
+combine and run in dependency order:
+
+```bash
+uv run python src/summarize.py -n <novel_name>                      # 1. recaps
+uv run python src/summarize.py -n <novel_name> --digest -g 5 --all  # 2. the rest
+```
+
+`--chapters` applies to every step, so `-c 1-20 --digest` digests just those twenty and merges
+into any existing `digest.txt` rather than replacing it.
+
+Model behaviour (quantization, generation parameters, paths, and the prompts for each stage) is
+configured in `src/summarizer_config.json`.
