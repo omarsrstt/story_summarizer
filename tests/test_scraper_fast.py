@@ -79,8 +79,9 @@ def test_run_fast_writes_one_chapter(tmp_path, monkeypatch):
         SITE, "novel", "1", str(tmp_path), False, 2, False, tmp_path
     )
     assert written == 1
-    assert (tmp_path / "novel" / "chapter_1.txt").exists()
-    assert "word" in (tmp_path / "novel" / "chapter_1.txt").read_text(encoding="utf-8")
+    path = tmp_path / "novel" / "chapter_00001.txt"
+    assert path.exists()
+    assert "word" in path.read_text(encoding="utf-8")
 
 
 def test_run_fast_skips_implausible_body(tmp_path, monkeypatch):

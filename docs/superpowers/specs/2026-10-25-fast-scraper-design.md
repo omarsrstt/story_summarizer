@@ -274,3 +274,41 @@ from "the page could not be read".
 - Corpus complete afterwards: 516 chapters, 1–516, no gaps.
 - Suite: 77 passed.
 
+
+### 11.3 Corpus naming and site furniture (2026-10-30)
+
+Two corpus-level problems were fixed outside the scraper's request path.
+
+**Five-digit chapter padding.** Chapters were written as `chapter_1.txt` through
+`chapter_516.txt`, which sorts lexicographically as 1, 10, 100, 101, ... Files are
+now written as `chapter_<n:05d>.txt`. This is a local metadata change: re-scraping
+to obtain the new names would re-download everything and risk replacing good local
+text with whatever the site serves today, so `corpus_tools rename-padding` renames
+in place. The two deprecated forms (`chapter_<n:04d>.txt` from the legacy Selenium
+engine and unpadded `chapter_<n>.txt`) remain recognised on *read* so a chapter
+that is already on disk under an old name is never re-scraped as a duplicate; the
+lookups are a migration window and can be deleted once no corpus uses them.
+
+**Trailer removal is statistical, not string-based.** 513 of 516 chapters ended in
+1-2 junk lines of three distinct texts. Naming those texts in code would have been
+correct for about a day: a live probe of the current site showed it injects *no*
+ad line at all, so the 513 trailers were residue from the previous site. The tool
+therefore learns the strings: a line qualifies as site furniture when it ends at
+least 10% of the directory's chapters. Real prose does not repeat verbatim across
+hundreds of chapters; footers do. Removal only walks in from the end and stops at
+the first non-recurring line, so mid-chapter dialogue that quotes the footer
+survives, and a file is never emptied.
+
+**Lesson recorded:** when cleaning scraped text, derive what to remove from the
+corpus rather than from the site's current DOM. Site furniture is a property of
+when the text was scraped, not of the site today.
+
+Reported plan on the real corpus: 516 renames, 848 lines in 513 files, three
+distinct trailer texts discovered with no hardcoded strings.
+
+**Verification evidence:** every migrated file parsed byte-identical to its backup
+once trailer lines were discounted (0 of 516 differ); all 516 names match
+`chapter_\d{5}\.txt`; range is 1-516 with no gaps or duplicates; the one
+lookalike real line ("thank you thank you thank you." in chapter 22) survived;
+`existing_chapter` resolves all four sampled chapters under the new names; the
+summarizer reads 516 contiguous chapters. Suite: 90 passed.

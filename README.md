@@ -106,6 +106,58 @@ automatically: 429 responses are retried with backoff, and a rate-limit page is 
 hard error rather than as "the chapter list ended", so a partial list can never be mistaken
 for a complete one.
 
+#### Chapter file names
+
+Chapters are written as `chapter_<number>.txt` with five-digit padding, so chapter 12 is
+`chapter_00012.txt` and the directory sorts correctly in any file browser. The scraper still
+recognises two older forms and treats them as already-present, so nothing is ever re-scraped as a
+duplicate:
+
+| Form | Status |
+| --- | --- |
+| `chapter_00012.txt` | current |
+| `chapter_0012.txt` | deprecated (written by the legacy engine) |
+| `chapter_12.txt` | deprecated (written before padding existed) |
+
+Run `rename-padding` (below) to migrate a directory; the deprecated lookups can be deleted once no
+corpus uses them.
+
+### Maintaining the Corpus
+
+`src/corpus_tools.py` tidies an existing chapter directory. Both commands are **dry runs by
+default** and print exactly what they would do; pass `--apply` to change files. A backup of the
+directory is written beside it (`<dir>.bak`) before the first change, since `novels/` is not
+tracked by git.
+
+```bash
+# Show what would happen (no writes)
+uv run python src/corpus_tools.py all novels/<novel_slug>
+
+# Do it: rename to five-digit padding, then drop site trailers
+uv run python src/corpus_tools.py all novels/<novel_slug> --apply
+
+# Or run just one of the two steps
+uv run python src/corpus_tools.py rename-padding   novels/<novel_slug> --apply
+uv run python src/corpus_tools.py strip-boilerplate novels/<novel_slug> --apply
+```
+
+#### How trailers are detected
+
+Sites append furniture to the end of a chapter ("read more at …", "thank you so much!"). That text
+changes whenever the site changes, so the tool does **not** contain a list of ad strings. Instead it
+learns them: a line is treated as boilerplate when the *same* line ends a large share (≥10%) of the
+chapters in the directory. Prose essentially never repeats verbatim across hundreds of chapters,
+while site footers do. Consequences worth knowing:
+
+- Only **trailing** lines are considered, and removal stops at the first line that does not recur.
+  Dialogue in the middle of a chapter that happens to quote the footer survives.
+- Removal is repeated, so a two-line footer is removed one line per pass.
+- A chapter is never emptied: if the whole file looks like boilerplate it is left alone.
+- Fewer than five chapters gives no statistical signal, so the tool declines to act.
+
+It is deliberately a tool you run, not something applied while scraping, so it never silently edits
+text it does not understand.
+
 ### Summarizing Chapters
 To summarize the scraped chapters, run the `summarizer.py` script:
 

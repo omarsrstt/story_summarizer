@@ -1,9 +1,14 @@
 """Chapter file writing for the fast scraper.
 
-Two filename forms exist in the corpus: the unpadded ``chapter_<n>.txt`` written
-by hand and the zero-padded ``chapter_<n:04d>.txt`` the legacy Selenium scraper
-emits. A chapter counts as present if either form exists, so the fast engine
-never duplicates a chapter the legacy engine already saved.
+Chapters are written as ``chapter_<n:05d>.txt`` (``chapter_00012.txt``). Two
+older forms still exist in the corpus and are **deprecated but recognised**:
+the zero-padded ``chapter_<n:04d>.txt`` the legacy Selenium scraper emitted, and
+the original unpadded ``chapter_<n>.txt``. A chapter counts as present if any
+form exists, so the fast engine never re-scrapes and duplicates a chapter that
+is already on disk under an old name.
+
+The deprecated lookups exist only as a migration window: ``corpus_tools`` can
+rename everything to the five-digit form, after which they can be deleted.
 """
 
 from __future__ import annotations
@@ -11,11 +16,19 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+PAD = 5
+
 
 def chapter_filename(number: int) -> str:
-    """Return the file name the fast engine writes for ``number``."""
+    """Return the file name the engine writes for ``number``."""
 
-    return f"chapter_{number}.txt"
+    return f"chapter_{number:0{PAD}d}.txt"
+
+
+def deprecated_chapter_filenames(number: int) -> tuple[str, ...]:
+    """Old name forms still accepted on read. Remove once the corpus is migrated."""
+
+    return (f"chapter_{number:04d}.txt", f"chapter_{number}.txt")
 
 
 def _novel_dir(save_root, novel_name: str) -> Path:
@@ -23,10 +36,10 @@ def _novel_dir(save_root, novel_name: str) -> Path:
 
 
 def existing_chapter(save_root, novel_name: str, number: int) -> Path | None:
-    """Return the path of an existing chapter file, checking both name forms."""
+    """Return the path of an existing chapter file, checking the current name first."""
 
     directory = _novel_dir(save_root, novel_name)
-    for name in (chapter_filename(number), f"chapter_{number:04d}.txt"):
+    for name in (chapter_filename(number), *deprecated_chapter_filenames(number)):
         candidate = directory / name
         if candidate.exists():
             return candidate
@@ -55,7 +68,7 @@ def write_chapter(
     if not overwrite and existing is not None:
         return None
 
-    # Overwrite a legacy padded file in place so we do not leave a second copy.
+    # Overwrite an existing old-named file in place so we do not leave a copy.
     target = existing if existing is not None else directory / chapter_filename(number)
 
     tmp = target.with_name(target.name + ".tmp")
