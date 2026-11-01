@@ -33,8 +33,8 @@ The project is designed to be lightweight and efficient, making it suitable for 
    ```bash
    uv sync
    ```
-   This installs the summarizer's core dependencies. For the scraper and web app, add the
-   extras: `uv sync --extra scraper --extra web`.
+   This installs the summarizer's core dependencies. For the scraper, web app and comic reader,
+   add the extras: `uv sync --extra scraper --extra web --extra comic`.
 3. Copy `src/scraper_config.example.json` to `src/scraper_config.json` and fill in the target
    site's URLs and CSS selectors. The real config is gitignored, so site details stay local.
 
@@ -157,6 +157,53 @@ while site footers do. Consequences worth knowing:
 
 It is deliberately a tool you run, not something applied while scraping, so it never silently edits
 text it does not understand.
+
+### Reading Comics
+
+Manhwa and manga need a reading stage the novels do not: the pages have to become text before
+anything can summarize them. `src/comic_reader.py` does only that, writing
+`novels/<slug>/chapter_NNNN.txt` — the exact layout `summarize.py` already looks for — so recap,
+`--group-size`, `--digest` and `--all` then work unchanged.
+
+```bash
+uv sync --extra comic
+uv run python src/comic_reader.py --series TBATE --comics comics/TBATE --only 1-5
+uv run python src/summarize.py -n TBATE -c 1-5 -g 5 --digest
+```
+
+   - `--series`: slug; output goes to `novels/<slug>/`.
+   - `--comics`: directory of page images.
+   - `--only`: `all`, `1`, `1-3` (default: all).
+   - `--overwrite`: re-read chapters that already have a transcript.
+
+Both page layouts work: one image per reader page (`c_1_07.jpg`) and a whole chapter stitched
+into one continuous scroll (`c_0_1.jpg`, 45 722 px tall). A scroll is cut into overlapping tiles
+because the detector only handles regions roughly its own size, and a bubble on a seam is dropped
+when both neighbouring tiles read it.
+
+Pages are **not** upscaled. Measured on real pages, 1× and 2× output were character-identical
+while 2× cost 31% more time, because the detector already resizes internally.
+
+Two OCR defects are corrected, since both visibly corrupt a transcript:
+
+- **Lost word spaces.** The recogniser is Chinese-trained and drops Latin inter-word spaces, so
+  58% of real blocks arrived fused (`HEDOESN'THIT`). A dictionary segmenter repairs them, guarded
+  so it cannot shred names — `SAPIN` stays `SAPIN` rather than becoming `sap in`.
+- **Hallucinated CJK glyphs** inside otherwise English text, which also crashed a cp1252 console.
+
+Proper nouns are the limit of what a dictionary can infer: nothing in the text distinguishes
+`sap in` from `block him from`. `src/comic_config.json` therefore carries a per-series `glossary`
+of names and story terms; add to it whenever a recap mangles a name. The same file holds the tile
+geometry.
+
+Filtering uses the segmenter's own 126k-word list rather than length guesses, which on a real
+chapter kept 287 of 294 blocks and dropped only page furniture (`213.`, `+`, `/`, `7`). A rare
+noise token still gets through, because the word list contains abbreviations like `nih`; tightening
+further starts discarding real text, which costs a summary more than one stray line.
+
+Structured transcripts are kept alongside the flat text at
+`transcripts/<slug>/chapter_NNNN.jsonl` (page, box, text, confidence, and whether the block sat in
+a bubble), so later passes — speaker attribution, non-bubble text — have geometry to work from.
 
 ### Summarizing Chapters
 Use `src/summarize.py`. It drives `llama-server` (llama.cpp) with a GGUF model instead of loading
