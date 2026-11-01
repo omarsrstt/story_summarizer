@@ -14,6 +14,7 @@ does on the transformers path.
 """
 
 import json
+import os
 import subprocess
 import urllib.error
 
@@ -392,3 +393,114 @@ def test_context_manager_releases_the_server(tmp_path, monkeypatch):
     with LlamaServer(binary, model, startup_timeout=5):
         pass
     assert proc.terminated or proc.killed
+
+
+# --------------------------------------------------------------------------
+# child output handling
+#
+# llama.cpp logs steadily (a startup banner, then lines per request). Capturing
+# that into ``subprocess.PIPE`` and never reading it fills the OS pipe buffer --
+# 4 KiB on Windows -- after which the server blocks inside ``write()`` while
+# holding its slot mutex. Generation stops, the GPU idles, and the waiting HTTP
+# client sees only silence until its request timeout. The child's output must
+# therefore be redirected somewhere that cannot fill up.
+# --------------------------------------------------------------------------
+
+def test_server_output_goes_to_a_file_not_an_undrained_pipe(tmp_path, monkeypatch):
+    binary = tmp_path / "llama-server.exe"
+    binary.write_bytes(b"stub")
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"stub")
+
+    seen = {}
+
+    def fake_popen(cmd, **kwargs):
+        seen.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=None: FakeResponse({}))
+
+    server = LlamaServer(binary, model, startup_timeout=5)
+    server.start()
+    server.stop()
+
+    assert seen["stdout"] is not subprocess.PIPE
+    assert seen["stderr"] is subprocess.STDOUT
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_exit_reason_reports_the_tail_of_the_server_log(tmp_path, monkeypatch):
+    """A server that dies while booting must still say why.
+
+    Redirecting output to a file must not cost the diagnostics: llama.cpp's own
+    message is the only clue when a model fails to load.
+    """
+
+    binary = tmp_path / "llama-server.exe"
+    binary.write_bytes(b"stub")
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"stub")
+
+    def fake_popen(cmd, **kwargs):
+        handle = kwargs["stdout"]
+        handle.write(b"llama_model_load: error loading model\nerror: failed to load\n")
+        handle.flush()
+        return FakeProcess(returncode=1)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=None: (_ for _ in ()).throw(urllib.error.URLError("down")),
+    )
+
+    server = LlamaServer(binary, model, startup_timeout=2)
+    with pytest.raises(GgufError) as err:
+        server.start()
+
+    message = str(err.value)
+    assert "exited during startup" in message
+    assert "failed to load" in message
+
+
+def test_real_binary_does_not_block_on_its_own_log_volume(tmp_path):
+    """The reproduction, against the real ``llama-server``.
+
+    ``--help`` prints far more than a pipe buffer and exits. Driving it through
+    the server's own spawn path therefore proves the redirection cannot fill up:
+    with an undrained pipe this hangs forever instead of exiting.
+    """
+
+    binary = _real_binary()
+    if binary is None:
+        pytest.skip("llama-server not available in tools/llama/bin")
+
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"stub")
+
+    server = LlamaServer(binary, model, log_path=tmp_path / "server.log")
+    process = server._spawn([str(binary), "--help"], dict(os.environ))
+
+    assert process.wait(timeout=120) == 0, "llama-server blocked writing its output"
+
+    logged = server.log_path.read_bytes()
+    # Several times the 4 KiB OS pipe buffer: the evidence that this content
+    # would have deadlocked a PIPE-based spawn.
+    assert len(logged) > 16384
+
+    server.stop()
+
+
+def _real_binary():
+    """The prebuilt llama-server in tools/, or None when it is absent."""
+
+    from pathlib import Path
+
+    candidate = (
+        Path(__file__).resolve().parent.parent
+        / "tools"
+        / "llama"
+        / "bin"
+        / "llama-server.exe"
+    )
+    return candidate if candidate.is_file() else None

@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -40,6 +42,11 @@ HOST = "127.0.0.1"
 
 #: llama.cpp prints no stable ready-marker on stdout, so readiness is polled.
 POLL_INTERVAL = 0.25
+
+#: An unbounded server log grows all run (~900 B per request), and a reload
+#: appends to it rather than starting over. Past this size the oldest half is
+#: dropped, keeping the recent crash evidence and the file small.
+LOG_MAX_BYTES = 8 * 1024 * 1024
 
 
 class GgufError(RuntimeError):
@@ -172,6 +179,7 @@ class LlamaServer:
         threads: int | None = None,
         startup_timeout: float = 600.0,
         request_timeout: float = 900.0,
+        log_path=None,
     ):
         self.binary = find_binary(str(binary)) if binary else find_binary(None)
         self.model = Path(model)
@@ -185,6 +193,13 @@ class LlamaServer:
         self.threads = threads
         self.startup_timeout = startup_timeout
         self.request_timeout = request_timeout
+        #: Where llama-server's output is written. It cannot be a pipe: nobody
+        #: reads it during a run, so the 4 KiB OS buffer silently swallows the
+        #: startup banner and any load error (see ``_spawn``).
+        self.log_path = Path(log_path) if log_path else (
+            Path(tempfile.gettempdir()) / f"llama-server-{os.getpid()}.log"
+        )
+        self._log_handle = None
 
         self.port: int | None = None
         self.process: subprocess.Popen | None = None
@@ -222,12 +237,7 @@ class LlamaServer:
         # llama.cpp's CUDA build needs its own DLLs beside the executable.
         env["PATH"] = f"{self.binary.parent}{os.pathsep}{env.get('PATH', '')}"
 
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
+        self.process = self._spawn(cmd, env)
 
         deadline = time.time() + self.startup_timeout
         while time.time() < deadline:
@@ -243,11 +253,69 @@ class LlamaServer:
             f"for {self.model.name}"
         )
 
+    def _spawn(self, cmd: list[str], env: dict) -> subprocess.Popen:
+        """Start llama-server with its output going to a log file.
+
+        The previous version captured the child's streams into ``subprocess.PIPE``
+        and never read them. That is how the *diagnostics* were lost: the OS pipe
+        buffer is only 4 KiB on Windows, and llama.cpp writes far more than that
+        during startup, so everything past the first few kB was silently dropped.
+        ``_exit_reason`` then reported an empty cause for a model that failed to
+        load.
+
+        Measured behaviour: a full pipe does not stall this build (it drops the
+        output), so this was not a deadlock. It is still not something to rely
+        on -- pipe blocking is a real hazard on other platforms and other log
+        volumes, and a file has no such limit. The file also keeps the log around
+        for the post-mortem that ``_stall_report`` and ``_exit_reason`` need.
+
+        A restart appends rather than truncates. ``log_path`` is keyed on the
+        client's PID, so it is the same file before and after a reload, and
+        reopening it with "wb" used to erase the crash that prompted the reload.
+        """
+
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep the file bounded: a 467-chapter run writes ~900 B per request,
+        # so an unbounded append across several reloads grows without limit.
+        # Trimming only when already large keeps the recent crash evidence.
+        if self.log_path.is_file() and self.log_path.stat().st_size > LOG_MAX_BYTES:
+            self._trim_log()
+        self._log_handle = open(self.log_path, "ab")
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=self._log_handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+
+    def _trim_log(self) -> None:
+        """Cut an oversized log back to its most recent half.
+
+        Best effort: a log that cannot be trimmed is still a valid log, and
+        losing the run over housekeeping would be worse than a huge file.
+        """
+
+        try:
+            keep = LOG_MAX_BYTES // 2
+            data = self.log_path.read_bytes()[-keep:]
+            self.log_path.write_bytes(data)
+        except OSError:
+            pass
+
     def stop(self) -> None:
         """Terminate the server, releasing its VRAM. Safe to call twice."""
 
         process, self.process = self.process, None
         self.port = None
+
+        handle, self._log_handle = self._log_handle, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:  # pragma: no cover - already closed
+                pass
+
         if process is None or process.poll() is not None:
             return
 
@@ -268,18 +336,132 @@ class LlamaServer:
         self.stop()
 
     def _exit_reason(self) -> str:
-        stderr = ""
-        stream = getattr(self.process, "stderr", None)
-        if stream is not None:
-            try:
-                stderr = stream.read().decode("utf-8", "replace")
-            except Exception:  # pragma: no cover - stderr already consumed
-                stderr = ""
-        tail = "\n".join(stderr.strip().splitlines()[-8:])
+        """Explain a startup death using the tail of llama-server's own log."""
+
+        tail = "\n".join(self._log_tail().strip().splitlines()[-8:])
         return (
             f"llama-server exited during startup for {self.model.name}"
             + (f":\n{tail}" if tail else "")
         )
+
+    def alive(self) -> bool:
+        """Whether the child process is still running.
+
+        Used to tell "slow" from "dead" when a request stops responding; the
+        HTTP client cannot distinguish the two on its own.
+        """
+
+        return self.process is not None and self.process.poll() is None
+
+    def _settled_alive(self, timeout: float = 2.0) -> bool:
+        """``alive()`` re-checked until the child's state is definite.
+
+        A killed child keeps reporting alive for ~200ms before Windows signals
+        the process handle, so a single ``poll()`` straight after a failed
+        request says "alive" for a server that has already died. Polling until
+        the answer is stable costs at most ``timeout`` seconds on a real stall,
+        and only on the failure path.
+        """
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.alive():
+                return False
+            time.sleep(0.1)
+        return self.alive()
+
+    def vram_report(self) -> str:
+        """A one-line GPU memory reading, or "" when nvidia-smi is unavailable.
+
+        An 8 GB card is the binding constraint on this project, so a stall is
+        far more informative with the memory figure beside it than without.
+        """
+
+        try:
+            done = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                 "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        line = done.stdout.strip().splitlines()
+        return f"VRAM: {line[0].strip()}" if line else ""
+
+    def _stall_report(self, exc: Exception) -> str:
+        """Explain a request that got no answer, using what the server left behind.
+
+        A bare "did not respond" cannot separate a GPU eviction from a wedged
+        lock. The last log line, the process state and the VRAM figure usually
+        can, and they cost nothing to collect once the request has already
+        failed.
+
+        A server that died is reported as dead and quotes llama.cpp's own last
+        error. An OOM on the 8 GB card looks like a hang from the client's side,
+        and "did not respond" sent the first investigation after a client-side
+        cause that was never there.
+        """
+
+        dead = not self._settled_alive()
+        lines = [f"llama-server did not respond for {self.model.name}: {exc}"]
+        lines.append(f"server alive: {'no' if dead else 'yes'}")
+
+        vram = self.vram_report()
+        if vram:
+            lines.append(vram)
+
+        if dead:
+            culprit = self._last_error()
+            if culprit:
+                lines.append(f"llama.cpp said: {culprit}")
+
+        tail = [line for line in self._log_tail().splitlines() if line.strip()]
+        if tail:
+            lines.append(f"last log line: {tail[-1].strip()}")
+            lines.append(f"log: {self.log_path}")
+        return "\n".join(lines)
+
+    def crashed(self) -> bool:
+        """Whether llama.cpp hit an error that killed it, rather than stalling.
+
+        Only called after a request has already failed, so reading the log costs
+        nothing. Any ``E`` line is llama.cpp flagging a fatal condition; an
+        ordinary slow request never writes one.
+        """
+
+        return self._last_error() is not None
+
+    def _last_error(self) -> str | None:
+        """llama.cpp's most recent fatal block, or None if it logged no error.
+
+        The cause and its context straddle several lines -- the real failure was
+        ``CUDA error: out of memory`` followed by ``in function launch_mul_mat_q
+        at mmq.cuh:1534``. Reporting only the last line loses which call failed,
+        so the whole trailing block is returned with timestamps stripped.
+        """
+
+        lines = self._log_tail().splitlines()
+        block: list[str] = []
+        for line in reversed(lines):
+            if re.match(r"^\d+\.\d+\.\d+\.\d+ E\s", line):
+                block.append(re.sub(r"^\d+\.\d+\.\d+\.\d+ E\s+", "", line).strip())
+            elif block:
+                break
+        if not block:
+            return None
+        return " / ".join(reversed(block))
+
+    def _log_tail(self, limit: int = 65536) -> str:
+        """The last ``limit`` bytes of the child's log, best effort."""
+
+        try:
+            with open(self.log_path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - limit))
+                return handle.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     # -- requests -------------------------------------------------------
 
@@ -328,9 +510,7 @@ class LlamaServer:
                 f"llama-server rejected the request ({exc.code}): {detail[:300]}"
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
-            raise GgufError(
-                f"llama-server did not respond for {self.model.name}: {exc}"
-            ) from exc
+            raise GgufError(self._stall_report(exc)) from exc
 
         self.last_stats = body.get("usage") or {}
         try:

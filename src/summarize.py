@@ -349,9 +349,44 @@ def summarise_chapters(server, args, config, entry, prompts, chapters,
     failures: list[tuple[int, str]] = []
     started = time.time()
 
+    def is_alive() -> bool:
+        """Whether the server is up. Assume up when it cannot say.
+
+        Restarting costs a ~9 s model load, so it is only worth attempting on
+        evidence that the child has actually exited. A server object with no
+        ``alive()`` is treated as healthy rather than reloaded blindly.
+        """
+
+        probe = getattr(server, "alive", None)
+        return True if probe is None else probe()
+
+    def revive(why: str) -> None:
+        """Bring a dead server back, or give up in a way that says why.
+
+        Continuing without a server is what turned one crash into 244 failure
+        lines: every later chapter failed instantly with "is not running", and
+        the run still exited as if it had merely found some bad chapters.
+        """
+
+        if is_alive():
+            return
+        tqdm.write(f"  llama-server is down ({why.splitlines()[0]}); reloading ...")
+        try:
+            server.start()
+        except GgufError as exc:
+            raise GgufError(
+                f"llama-server died and could not be restarted, so the remaining "
+                f"chapters were not attempted.\nFirst failure: {why}\nRestart: {exc}"
+            ) from exc
+        tqdm.write("  llama-server is back; carrying on")
+
     with tqdm(total=len(pending), desc="Summarising") as bar:
         for number in pending:
             bar.set_description(f"Chapter {number}")
+            if not is_alive():
+                # A crash on the previous chapter is not discovered until the
+                # next request, so check before starting one rather than after.
+                revive("it exited while the previous chapter was running")
             text = chapters[number].read_text(encoding="utf-8")
             try:
                 prompt_tokens = budget_check(server, prompts, text, number,
@@ -363,7 +398,11 @@ def summarise_chapters(server, args, config, entry, prompts, chapters,
             except (GgufError, UsageError) as exc:
                 # One bad chapter must not discard an hour of work.
                 failures.append((number, str(exc)))
-                tqdm.write(f"  chapter {number}: FAILED -- {exc}")
+                tqdm.write(f"  chapter {number}: FAILED -- {str(exc).splitlines()[0]}")
+                if not isinstance(exc, UsageError):
+                    # Triggered when the request was long enough to grow the
+                    # context, which is the likeliest moment for a crash.
+                    revive(str(exc))
                 bar.update(1)
                 continue
 
@@ -867,11 +906,15 @@ def run(args) -> int:
 
     print(f"\nStarting llama-server ({model_path.name}, n_ctx={n_ctx}) ...", flush=True)
     started = time.time()
-    server.start()
-    print(f"Model ready in {time.time() - started:.1f}s", flush=True)
 
     status = 0
     try:
+        # start() sits *inside* the try on purpose: model loading takes several
+        # seconds, and a Ctrl+C during it must still unload the child. Leaving
+        # start() outside left an orphan holding ~6.5GB, which a later run then
+        # had to compete with for VRAM.
+        server.start()
+        print(f"Model ready in {time.time() - started:.1f}s", flush=True)
         for action in actions:
             print()
             if action == "chapters":
@@ -948,6 +991,11 @@ def main(argv: list[str] | None = None) -> int:
         return run(args)
     except UsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except GgufError as exc:
+        # A server that died and would not restart ends the run. Reporting it
+        # as a plain error beats a traceback that buries the cause.
+        print(f"\nerror: {exc}", file=sys.stderr)
         return 2
 
 
