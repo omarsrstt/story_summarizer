@@ -70,8 +70,12 @@ def test_a_webp_page_keeps_its_extension():
 def test_the_reader_accepts_the_name_the_writer_produces():
     from comic_reader import CHAPTER_PATTERNS
 
+    # The pattern is greedy over \d+, so it captures "000175", not "175". What
+    # matters is that the reader still recovers the ordinal it was written with.
     name = page_filename(175, 12, ".png")
-    assert CHAPTER_PATTERNS[0].match(name).groups() == ("175", "12")
+    match = CHAPTER_PATTERNS[0].match(name)
+    assert match is not None
+    assert (int(match.group(1)), int(match.group(2))) == (175, 12)
 
 
 def test_an_unknown_extension_is_refused():
@@ -129,7 +133,7 @@ git commit -m "feat(comic): one shared page-naming rule for scraper and reader"
   - `@dataclass Manifest(series: str, site: str, chapters: list[ChapterRecord])`
   - `load_manifest(path: Path) -> Manifest` — a missing file yields an empty manifest.
   - `save_manifest(path: Path, manifest: Manifest) -> None` — atomic: write `<path>.tmp`, then `os.replace`.
-  - `assign(manifest: Manifest, listing: list[tuple[str, str]]) -> Manifest` — `listing` is `(slug, label)` in the site's **raw newest-first** order; returns a manifest whose `chapters` are in ascending ordinal order.
+  - `assign(manifest: Manifest, listing: list[tuple[str, str]]) -> Manifest` — `listing` is `(slug, label)` in the site's **raw newest-first** order; returns a manifest whose `chapters` are in ascending ordinal order, and prints one line naming any chapter it could not place in its list position.
   - `ordinal_of_label(manifest: Manifest, label: str) -> int | None`
   - `parse_label_number(label: str) -> float` — `"Chapter 175.10"` → `175.10`, `"Chapter 280 - 237"` → `280.0`.
 
@@ -245,11 +249,11 @@ Model the atomic write on `scraper_store.py`. `ChapterRecord` converts to and fr
 
 1. Group the existing records by `slug`.
 2. Reverse `listing` so it is oldest-first (reading order).
-3. Walk it, keeping `previous = 0`. For a known slug, keep its record and set `previous = record.ordinal`. For an unknown slug, set `ordinal = max(previous, highest ordinal of any known chapter listed before this one in reading order) + 1`.
-4. Records for slugs no longer in the listing are kept unchanged and appended, so a site that temporarily drops a chapter does not lose its ordinal.
+3. Walk it. A known slug keeps its record unchanged. An unknown slug gets `max(ordinal of every chapter already in the manifest) + 1`.
+4. Records for slugs no longer in the listing are kept unchanged, so a site that temporarily drops a chapter does not lose its ordinal.
 5. Return `chapters` sorted by ordinal.
 
-Because an unknown slug only ever takes a number strictly greater than everything before it, an existing ordinal can never move, and an insertion produces a visible gap rather than a renumber.
+An unknown slug can only ever take a number strictly greater than every ordinal already assigned, so **no existing chapter's ordinal can ever move** — that is the design's binding constraint. The price is deliberate: a chapter the site inserts retroactively sits at the end of reading order rather than in its true position, because the integer slot between two assigned chapters does not exist and renumbering is forbidden. `assign` therefore prints one line for each such chapter (`note: <label> is listed before <label> but was appended as chapter <N>`) so the anomaly is visible rather than silent.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -269,8 +273,8 @@ git commit -m "feat(comic): a manifest that pins ordinals to slugs"
 
 **Files:**
 - Modify: `src/scraper_fast.py:52-96` (extract the retry loop, add `post_transport`)
-- Modify: `src/comic_scraper.py` (rewrite the parsing half; delete `next_chapter`, `Run.html`, `ChapterPage`)
-- Test: `tests/test_scraper_fast.py` (append), `tests/test_comic_scraper.py` (replace the parse/walk section, keep the refusal tests)
+- Modify: `src/comic_scraper.py` (rewrite the parsing half; delete `next_chapter`, `Run`, `ChapterPage`, `ChapterPlan`, `plan_chapters`, `image_filename`, `scrape_chapters`)
+- Test: `tests/test_scraper_fast.py` (append), `tests/test_comic_scraper.py` (replace the file: the walk/resume tests exercise deleted functions)
 
 **Interfaces:**
 - Consumes: `scraper_fast._MAX_ATTEMPTS`, `_BACKOFF_BASE`, `_RATE_LIMIT_MAX_ATTEMPTS`, `_RATE_LIMIT_BASE`; `scraper_parse.looks_like_challenge`; `comic_reader.load_config`.
@@ -280,9 +284,10 @@ git commit -m "feat(comic): a manifest that pins ordinals to slugs"
   - `comic_scraper.ScrapeError(Exception)` — kept.
   - `comic_scraper.fetch_chapter_list(series_url: str) -> list[tuple[str, str]]` — `(slug, label)` in the site's own newest-first order; raises `ScrapeError` naming "challenge" on a non-200 or an interstitial.
   - `comic_scraper.chapter_url(series_url: str, slug: str) -> str`
-  - `comic_scraper.page_urls(html: str) -> list[str]` — image URLs in page order, off-site and placeholder URLs dropped.
-  - `comic_scraper.safe_image_url(url: str) -> bool` — kept from the current file, unchanged behaviour.
-  - `comic_scraper.image_ext(url: str) -> str` — `.jpg`/`.jpeg`/`.png`/`.webp`, lowercased, `.jpeg` folded to `.jpg`.
+  - `comic_scraper.page_urls(html: str) -> list[str]` — image URLs in page order, off-site URLs dropped.
+  - `comic_scraper.safe_image_url(url: str) -> bool` — carried over from the replaced file unchanged.
+  - `comic_scraper.image_ext(url: str) -> str` — `.jpg`/`.jpeg`/`.png`/`.webp`; unknown or missing extensions raise `ScrapeError`.
+  - `comic_scraper._with_retries`, `post_transport` imported into the module namespace so tests can monkeypatch them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -310,12 +315,40 @@ def test_a_get_still_uses_the_shared_policy(monkeypatch):
 ```
 
 ```python
-# tests/test_comic_scraper.py  (replaces the parse/walk section)
+# tests/test_comic_scraper.py  (replaces the file; these two blocks are the
+# ones worth keeping from the version it replaces, and carry over verbatim)
 import pytest
 
 import comic_scraper as cs
 
 SERIES = "https://comic-site.test/manga/the-beginning-after-the-end-series/"
+
+# A trimmed copy of real output: the lazy-load pattern is what matters -- `src`
+# is a placeholder and the real address lives in `data-src`.
+CHAPTER_HTML = """
+<div class="reading-content">
+  <div class="page-break ">
+    <img id="image-0" alt="Load image..."
+         src="https://comic-site.test/wp-content/themes/madara/images/loading6.svg"
+         data-src="https://c1.comic-site.test/manga_abc/chapter_0/c_0_1.jpg"
+         class="wp-manga-chapter-img img-responsive lazyload effect-fade">
+  </div>
+  <div class="page-break ">
+    <img id="image-1" alt="Load image..."
+         src="https://comic-site.test/wp-content/themes/madara/images/loading6.svg"
+         data-src="https://c1.comic-site.test/manga_abc/chapter_0/c_0_2.jpg"
+         class="wp-manga-chapter-img img-responsive lazyload effect-fade">
+  </div>
+</div>
+"""
+
+# A real Cloudflare interstitial, trimmed to the markers scraper_parse tests for.
+CHALLENGE_HTML = """
+<html><head><script>window._cf_chl_opt = {}</script></head>
+<body>Enable JavaScript and cookies to continue</body></html>
+"""
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
 
 LIST_HTML = """
 <li class="wp-manga-chapter"><a href="{s}chapter-177/">Chapter 177</a></li>
@@ -329,6 +362,9 @@ PAGE_HTML = """
      data-src="https://c4.comic-site.test/manga_x/chapter_276/ch_276_2.webp">
 <img class="wp-manga-chapter-img" data-src="https://evil.example/banner.jpg">
 """
+
+
+# -- the chapter list, in one request --------------------------------------
 
 
 def test_the_list_is_returned_in_the_sites_own_order(monkeypatch):
@@ -355,7 +391,7 @@ def test_the_list_request_asks_for_ajax(monkeypatch):
 
 def test_a_challenge_where_the_list_should_be_stops_the_run(monkeypatch):
     monkeypatch.setattr(
-        cs, "post_transport", lambda u, h, c: (200, "<script>window._cf_chl_opt={}</script>")
+        cs, "post_transport", lambda u, h, c: (200, CHALLENGE_HTML)
     )
     with pytest.raises(cs.ScrapeError, match="challenge"):
         cs.fetch_chapter_list(SERIES)
@@ -367,15 +403,71 @@ def test_a_non_200_list_is_an_error(monkeypatch):
         cs.fetch_chapter_list(SERIES)
 
 
-def test_every_image_shape_is_read_in_page_order():
+# -- the page decides what gets downloaded ---------------------------------
+
+
+def test_images_are_read_from_data_src_not_the_placeholder():
+    assert cs.page_urls(CHAPTER_HTML) == [
+        "https://c1.comic-site.test/manga_abc/chapter_0/c_0_1.jpg",
+        "https://c1.comic-site.test/manga_abc/chapter_0/c_0_2.jpg",
+    ]
+
+
+def test_load_placeholders_are_never_returned():
+    assert all("loading6.svg" not in url for url in cs.page_urls(CHAPTER_HTML))
+
+
+def test_a_page_without_chapter_images_yields_nothing():
+    assert cs.page_urls("<html><body>Nothing here</body></html>") == []
+
+
+def test_an_offsite_image_url_on_a_page_is_skipped():
     assert cs.page_urls(PAGE_HTML) == [
         "https://c4.comic-site.test/manga_x/chapter_276/ch_276_1.jpg",
         "https://c4.comic-site.test/manga_x/chapter_276/ch_276_2.webp",
     ]
 
 
+def test_every_image_shape_is_read_in_page_order():
+    html = "".join(
+        f'<img class="wp-manga-chapter-img" data-src="{u}">'
+        for u in (
+            "https://x.comic-site.test/a/c_1_1.jpg",
+            "https://x.comic-site.test/a/ch_1_2.webp",
+            "https://x.comic-site.test/a/67.webp",
+            "https://x.comic-site.test/a/1-(2).jpeg",
+            "https://x.comic-site.test/a/ch-259-img-3.jpg",
+            "https://x.comic-site.test/a/9.png",
+        )
+    )
+    assert len(cs.page_urls(html)) == 6
+
+
 def test_a_chapter_url_is_built_from_the_slug():
     assert cs.chapter_url(SERIES, "chapter-175-19") == SERIES + "chapter-175-19/"
+
+
+# -- refusing to fetch anything that is not the comic ----------------------
+
+
+def test_only_the_configured_image_host_is_allowed():
+    assert cs.safe_image_url("https://c1.comic-site.test/manga_abc/chapter_0/c_0_1.jpg")
+    assert cs.safe_image_url("https://comic-site.test/wp-content/uploads/x.jpg")
+
+
+def test_an_ad_or_foreign_host_is_refused():
+    # These pages carry obfuscated scripts that redirect to ad hosts; an image
+    # URL pointing off-site must never be fetched.
+    for bad in (
+        "https://evil.example.com/tracker.jpg",
+        "https://comic-site.test.evil.example/c_0_1.jpg",
+        "http://comic-site.test@evil.example/c_0_1.jpg",
+        "data:image/jpeg;base64,AAAA",
+    ):
+        assert not cs.safe_image_url(bad), bad
+
+
+# -- extensions, so a page is saved under one name -------------------------
 
 
 @pytest.mark.parametrize(
@@ -401,7 +493,7 @@ Expected: FAIL — `post_transport`, `fetch_chapter_list`, `page_urls`, `chapter
 
 In `src/scraper_fast.py`: move the body of `default_transport`'s loop into `_with_retries(fetch)` unchanged, and make `default_transport` a one-liner around it — `return _with_retries(lambda: _raw_transport(url, headers, cookies))`. Add `_raw_post_transport` mirroring `_raw_transport` but using `cffi.post`, and `post_transport` as `_with_retries(lambda: _raw_post_transport(url, headers, cookies))`.
 
-In `src/comic_scraper.py`: `fetch_chapter_list` POSTs to `series_url.rstrip("/") + "/ajax/chapters/"` with `{"X-Requested-With": "XMLHttpRequest"}`, raises `ScrapeError` (mentioning "challenge" when `looks_like_challenge(body)`) if the status is not 200, then selects `a[href*=chapter]` with BeautifulSoup and returns `(href.rstrip("/").rsplit("/", 1)[-1], a.get_text(" ", strip=True))`. `page_urls` selects `img.wp-manga-chapter-img`, prefers `data-src` over `src`, and keeps only URLs passing `safe_image_url`. `image_ext` takes `urlparse(url).path`'s suffix, lowercases it, and maps `.jpeg` to `.jpg`.
+In `src/comic_scraper.py`: `fetch_chapter_list` POSTs to `series_url.rstrip("/") + "/ajax/chapters/"` with `{"X-Requested-With": "XMLHttpRequest"}`, raises `ScrapeError` (mentioning "challenge" when `looks_like_challenge(body)`) if the status is not 200, then selects `a[href*=chapter]` with BeautifulSoup and returns `(href.rstrip("/").rsplit("/", 1)[-1], a.get_text(" ", strip=True))`. `page_urls` selects `img.wp-manga-chapter-img`, prefers `data-src` over `src`, and keeps only URLs passing `safe_image_url`. `image_ext` takes `urlparse(url).path`'s suffix, lowercases it, folds `.jpeg` to `.jpg`, and raises `ScrapeError` for anything else — a page whose extension cannot be determined must fail loudly rather than be saved under a guessed name.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -622,7 +714,9 @@ Expected: FAIL — `ChapterRecord` not imported, `download_chapter` missing.
 
 `bytes_transport` mirrors `_raw_transport` but returns `resp.content`, going through `_with_retries`.
 
-`download_chapter` fetches the chapter page with `default_transport` (raising `ScrapeError` on a challenge), calls `page_urls`, and for each URL at 1-based index `i` computes `page_filename(record.ordinal, i, image_ext(url))`. A page already on disk is skipped unless `overwrite`. Otherwise fetch with `bytes_transport` under `{"Referer": series_url}`, reject anything failing `looks_like_image`, and write the file. `time.sleep(delay)` between requests. Return counts of pages saved, pages failed, and total pages on disk for that ordinal. Set `record.pages` and `record.content_hash` to the page count and the average hash of page 1 when it was fetched.
+`download_chapter` fetches the chapter page with `default_transport` (raising `ScrapeError` on a challenge), calls `page_urls`, and for each URL at 1-based index `i` computes `page_filename(record.ordinal, i, image_ext(url))`. A page already on disk is skipped unless `overwrite`. Otherwise fetch with `bytes_transport` under `{"Referer": series_url}`, reject anything failing `looks_like_image`, and write the file. `time.sleep(delay)` between requests. Return counts of pages saved, pages failed, and total pages on disk for that ordinal. Set `record.pages` to the number of URLs the page listed.
+
+Do **not** set `content_hash` here: the hash belongs to the scan pass (Task 6), which decides duplicates before any byte is written. Two writers for one field is how they drift.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -792,6 +886,7 @@ git commit -m "feat(comic): settle duplicates before writing, resume without ren
 - Consumes: `scraper.parse_chapter_input` for ordinal selections; `comic_manifest.assign`, `load_manifest`, `save_manifest`.
 - Produces:
   - `comic_scraper.parse_label_selection(text: str) -> list[float]` — `"175.1"`, `"175.1-175.19"`, `"144,150"`; raises `ValueError` on anything else.
+  - `comic_scraper.normalise_label(text: str) -> str` — case-folded, `chapter` prefix stripped, whitespace collapsed to one space.
   - `comic_scraper.select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]` — `None`/`"all"` for everything; site labels otherwise.
   - CLI: `-n/--name` (output folder), `--slug` (site slug, defaults to `--name`), `-c/--chapters` (site labels), `--ordinals` (manifest positions, parsed by `scraper.parse_chapter_input`), `--from/--to` (label bounds), `--all`, `--overwrite`, `--dry-run`, `--delay`.
 
@@ -840,6 +935,25 @@ def test_a_label_selects_its_chapter():
     assert [r.ordinal for r in select_plan(manifest, "144")] == [1]
 
 
+def test_a_label_match_is_not_ambiguous_for_a_re_upload():
+    # 144 and 144.0 both publish the number 144.0, so matching on the number
+    # would select both. The label is the site's own identifier and is unique.
+    manifest = Manifest(
+        "T",
+        "s",
+        [
+            ChapterRecord(1, "chapter-144", "Chapter 144", 144.0),
+            ChapterRecord(2, "chapter-144.0", "Chapter 144.0", 144.0),
+        ],
+    )
+    assert [r.ordinal for r in select_plan(manifest, "144.0")] == [2]
+
+
+def test_a_selection_may_leave_out_the_chapter_word():
+    manifest = Manifest("T", "s", [ChapterRecord(1, "a", "Chapter 175.1", 175.1)])
+    assert [r.ordinal for r in select_plan(manifest, "175.1")] == [1]
+
+
 def test_no_selection_means_everything():
     manifest = Manifest("T", "s", [ChapterRecord(1, "a", "Chapter 1", 1.0)])
     assert select_plan(manifest, None) == manifest.chapters
@@ -859,7 +973,7 @@ Expected: FAIL with `ImportError: cannot import name 'parse_label_selection'`
 
 - [ ] **Step 3: Implement and update docs**
 
-`parse_label_selection` splits on commas; a part containing `-` is a range whose step is 0.1 when either end has a fractional part and 1.0 otherwise; expand inclusively and round to 3 decimals so float drift cannot produce `175.29999999999998`. `select_plan` matches on `ChapterRecord.number` compared with a tolerance of 0.05, and raises `ValueError` naming the missing label when nothing matches.
+`parse_label_selection` splits on commas; a part containing `-` is a range whose step is 0.1 when either end has a fractional part and 1.0 otherwise; expand inclusively and round to 3 decimals so float drift cannot produce `175.29999999999998`. `normalise_label` case-folds, strips a leading `chapter`, and collapses whitespace, so `"Chapter 175.1"` and `"175.1"` compare equal. `select_plan` matches a selection against `normalise_label(record.label)` first; only if nothing matches does it fall back to `record.number` within a tolerance of 0.05, and it raises `ValueError` naming the missing label when neither matches. Label-first is what makes `-c 144` and `-c 144.0` select different chapters.
 
 `main` loads the config, resolves the series URL from `--slug` and `comic_series_url`, fetches the list, `assign`s and saves the manifest, prints the plan, then calls `run`. `--dry-run` scans and prints without writing pages.
 
