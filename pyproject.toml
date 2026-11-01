@@ -28,6 +28,9 @@ scraper = [
 web = [
     "flask",
 ]
+comic = [
+    "wordninja>=2.0.0",
+]
 
 # Development-only tooling (unit tests for the parsing/session helpers).
 [dependency-groups]

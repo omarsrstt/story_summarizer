@@ -1341,6 +1341,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+comic = [
+    { name = "wordninja" },
+]
 scraper = [
     { name = "beautifulsoup4" },
     { name = "curl-cffi" },
@@ -1372,8 +1375,9 @@ requires-dist = [
     { name = "transformers", specifier = ">=4.51" },
     { name = "undetected-chromedriver", marker = "extra == 'scraper'" },
     { name = "webdriver-manager", marker = "extra == 'scraper'" },
+    { name = "wordninja", marker = "extra == 'comic'", specifier = ">=2.0.0" },
 ]
-provides-extras = ["scraper", "web"]
+provides-extras = ["scraper", "web", "comic"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest" }]
@@ -1795,6 +1799,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/a4/34/4dd12fc8bb7d61c91
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a1/38/df03f564f43cec2684823f3cccae1a652ee7face1cbaa76fb223096e64d7/werkzeug-3.1.9-py3-none-any.whl", hash = "sha256:6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab", size = 228700, upload-time = "2026-09-27T18:33:39.685Z" },
 ]
+
+[[package]]
+name = "wordninja"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/15/abe4af50f4be92b60c25e43c1c64d08453b51e46c32981d80b3aebec0260/wordninja-2.0.0.tar.gz", hash = "sha256:1a1cc7ec146ad19d6f71941ee82aef3d31221700f0d8bf844136cf8df79d281a", size = 541572, upload-time = "2019-08-10T02:16:54.944Z" }
 
 [[package]]
 name = "wsproto"
