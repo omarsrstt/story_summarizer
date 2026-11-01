@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 import time
 
 from scraper import parse_chapter_input
@@ -67,21 +68,42 @@ def _raw_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
         return 0, ""
 
 
-def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
-    """Fetch ``url`` with curl_cffi, retrying transient failures with backoff.
+def _raw_post_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
+    """Single curl_cffi POST (no retries). Returns (status, body); status 0 on error."""
+
+    from curl_cffi import requests as cffi
+
+    try:
+        resp = cffi.post(
+            url,
+            impersonate="chrome",
+            headers=headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        return resp.status_code, resp.text
+    except Exception:  # noqa: BLE001 - timeouts raise here; surfaced as status 0
+        return 0, ""
+
+
+def _with_retries(fetch: Callable[[], tuple[int, object]]) -> tuple[int, object]:
+    """Run ``fetch`` under the shared retry policy and return its last result.
 
     A timeout (status 0) or a 5xx is retried up to ``_MAX_ATTEMPTS`` times with
     exponential backoff. A 429 (Cloudflare rate limiting) is retried more
     patiently, since the site advertises a ~10s ``Retry-After`` when it throttles
     a burst. Other statuses (including a 403, which may be a Cloudflare
     challenge) are returned immediately so ``FastSession`` can react.
+
+    Shared by every verb the comic scraper needs, so a GET and a POST cannot
+    drift into different ideas of how many attempts a blip is worth.
     """
 
     status, body = 0, ""
     attempts = 0
     rate_attempts = 0
     while attempts < _MAX_ATTEMPTS:
-        status, body = _raw_transport(url, headers, cookies)
+        status, body = fetch()
         if status == 429:
             rate_attempts += 1
             if rate_attempts >= _RATE_LIMIT_MAX_ATTEMPTS:
@@ -94,6 +116,25 @@ def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]
         if attempts < _MAX_ATTEMPTS:
             time.sleep(_BACKOFF_BASE * (2 ** (attempts - 1)))
     return status, body
+
+
+def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
+    """Fetch ``url`` with curl_cffi, retrying transient failures with backoff.
+
+    The policy lives in :func:`_with_retries`; this only names the verb.
+    """
+
+    return _with_retries(lambda: _raw_transport(url, headers, cookies))
+
+
+def post_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:
+    """POST ``url`` with curl_cffi under the same retry policy as a GET.
+
+    The chapter list is an AJAX endpoint: it answers a plain GET with ``0`` and
+    the real list only to a POST carrying ``X-Requested-With``.
+    """
+
+    return _with_retries(lambda: _raw_post_transport(url, headers, cookies))
 
 
 def make_session(

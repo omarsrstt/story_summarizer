@@ -117,3 +117,24 @@ def test_chapter_url_uses_config_template():
     assert fast.chapter_url(site, "novel", "chapter-530-end-story") == (
         "https://x/book/novel/chapter-530-end-story"
     )
+
+
+import scraper_fast as sf
+
+
+def test_a_post_goes_through_the_same_retry_policy(monkeypatch):
+    calls = []
+
+    def flaky(url, headers, cookies):
+        calls.append(url)
+        return (503, "") if len(calls) < 3 else (200, "ok")
+
+    monkeypatch.setattr(sf, "_raw_post_transport", flaky)
+    monkeypatch.setattr(sf.time, "sleep", lambda _s: None)
+    assert sf.post_transport("https://x/y", {}, {}) == (200, "ok")
+    assert len(calls) == 3
+
+
+def test_a_get_still_uses_the_shared_policy(monkeypatch):
+    monkeypatch.setattr(sf, "_raw_transport", lambda u, h, c: (200, "body"))
+    assert sf.default_transport("https://x/y", {}, {}) == (200, "body")
