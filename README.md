@@ -166,7 +166,8 @@ anything can summarize them. `src/comic_reader.py` does only that, writing
 `--group-size`, `--digest` and `--all` then work unchanged.
 
 ```bash
-uv sync --extra comic
+uv sync --extra comic --extra scraper
+uv run python src/comic_scraper.py --slug my-comic-series -n TBATE -c 1-5
 uv run python src/comic_reader.py --series TBATE --comics comics/TBATE --only 1-5
 uv run python src/summarize.py -n comic-TBATE -c 1-5 -g 5 --digest
 ```
@@ -175,6 +176,40 @@ uv run python src/summarize.py -n comic-TBATE -c 1-5 -g 5 --digest
    - `--comics`: directory of page images.
    - `--only`: `all`, `1`, `1-3` (default: all).
    - `--overwrite`: re-read chapters that already have a transcript.
+
+#### Downloading the pages
+
+`src/comic_scraper.py` gets the images into `comics/<name>/` so the reader has something to read.
+It reuses the novel scraper's parts rather than its own: `scraper_fast.default_transport` for the
+`curl_cffi` TLS impersonation the site's bot check demands (plus timeout/5xx retries and 429
+backoff), `scraper_parse.looks_like_challenge`, `scraper.parse_chapter_input` for the `1-5,8`
+syntax, and `scraper_store`'s five-digit chapter naming.
+
+```bash
+uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE -c 1-5
+uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE --all
+```
+
+   - `--slug`: series slug from the site URL; `-n` is only the local folder name.
+   - `-c`: chapter selection in **site** numbering, e.g. `1-5,8`.
+   - `--all`: walk the next-chapter links until the series ends.
+   - `--overwrite` / `--delay` / `--dry-run`: as for the novel scraper.
+
+Chapter numbering is the trap here. The site's reader **chapter N** is stored on its CDN as
+`chapter_<N-1>`, so chapter 1 is `chapter_0/c_0_1.jpg` and chapter 2 is `chapter_1/c_1_1.jpg`.
+Filenames deliberately keep the *storage* numbering, because that is what `comic_reader` groups on
+and what a manual save already produces — so a filename can look off by one and still be right.
+
+The chapter list is loaded by JavaScript and its endpoint answers `0` to a plain request, so `--all`
+walks the page's own next/prev links instead and stops when a chapter carries no reader images.
+That is also why the challenge check matters: a Cloudflare page has no images either, and without
+distinguishing them the walk would end early and still report a clean finish. A non-200 chapter
+page aborts the run for the same reason. Verified byte-identical against a manual download of
+chapters 1 and 2, which is also how a page missing from that manual set (`c_1_38.jpg`) was found.
+
+Only `comic-site.test` and its subdomains are fetched, over HTTP(S) only; the pages inject obfuscated
+scripts that redirect to ad hosts, so off-site image URLs are refused and no JavaScript is ever
+executed.
 
 #### Comics get their own slug
 
