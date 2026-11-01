@@ -1,6 +1,7 @@
 import pytest
 
 import scraper_fast as fast
+import scraper_fast as sf
 
 
 def test_transport_retries_on_5xx_then_succeeds(monkeypatch):
@@ -117,9 +118,6 @@ def test_chapter_url_uses_config_template():
     assert fast.chapter_url(site, "novel", "chapter-530-end-story") == (
         "https://x/book/novel/chapter-530-end-story"
     )
-
-
-import scraper_fast as sf
 
 
 def test_a_post_goes_through_the_same_retry_policy(monkeypatch):

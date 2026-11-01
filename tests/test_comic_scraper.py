@@ -110,18 +110,26 @@ def test_an_offsite_image_url_on_a_page_is_skipped():
 
 
 def test_every_image_shape_is_read_in_page_order():
-    html = "".join(
-        f'<img class="wp-manga-chapter-img" data-src="{u}">'
-        for u in (
-            "https://x.comic-site.test/a/c_1_1.jpg",
-            "https://x.comic-site.test/a/ch_1_2.webp",
-            "https://x.comic-site.test/a/67.webp",
-            "https://x.comic-site.test/a/1-(2).jpeg",
-            "https://x.comic-site.test/a/ch-259-img-3.jpg",
-            "https://x.comic-site.test/a/9.png",
-        )
+    urls = (
+        "https://x.comic-site.test/a/c_1_1.jpg",
+        "https://x.comic-site.test/a/ch_1_2.webp",
+        "https://x.comic-site.test/a/67.webp",
+        "https://x.comic-site.test/a/1-(2).jpeg",
+        "https://x.comic-site.test/a/ch-259-img-3.jpg",
+        "https://x.comic-site.test/a/9.png",
     )
-    assert len(cs.page_urls(html)) == 6
+    html = "".join(
+        f'<img class="wp-manga-chapter-img" data-src="{u}">' for u in urls
+    )
+    assert cs.page_urls(html) == list(urls)
+
+
+def test_a_placeholder_src_without_data_src_yields_nothing():
+    html = (
+        '<img class="wp-manga-chapter-img" '
+        'src="https://comic-site.test/wp-content/themes/madara/images/loading6.svg">'
+    )
+    assert cs.page_urls(html) == []
 
 
 def test_a_chapter_url_is_built_from_the_slug():
@@ -163,3 +171,15 @@ def test_an_ad_or_foreign_host_is_refused():
 )
 def test_extensions_are_normalised(url, ext):
     assert cs.image_ext(url) == ext
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.comic-site.test/a/c_1_1.gif",
+        "https://x.comic-site.test/a/c_1_1",
+    ],
+)
+def test_an_unknown_or_missing_extension_is_refused(url):
+    with pytest.raises(cs.ScrapeError):
+        cs.image_ext(url)

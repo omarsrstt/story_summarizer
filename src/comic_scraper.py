@@ -14,7 +14,9 @@ What it reuses from the novel scraper, and why each one matters:
   impersonation the site's bot check requires, plus timeout/5xx retries and 429
   backoff. There is one retry policy for the whole project, not one per verb.
 * ``comic_reader.load_config`` -- the same ``comic_config.json`` the reading
-  stage uses, so the comics directory cannot disagree between the two.
+  stage uses, so the comics directory cannot disagree between the two. Imported
+  inside the function, not at module level: the reader pulls in the OCR extra's
+  numpy/wordninja, and a download-only install must not need them to import this.
 
 Two things about this site were measured, not assumed:
 
@@ -42,7 +44,6 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from comic_reader import load_config  # noqa: F401 - re-exported; one config reader
 from scraper_fast import _with_retries, post_transport  # noqa: F401 - re-exported
 from scraper_parse import looks_like_challenge
 
@@ -64,6 +65,17 @@ _EXTENSION_ALIASES = {".jpeg": ".jpg"}
 
 class ScrapeError(Exception):
     """A refusal that retrying will not fix."""
+
+
+def load_config(path=None):
+    """Read ``comic_config.json`` via the reader's loader; imported lazily.
+
+    Deferred so a download-only install (``--extra scraper``) does not need the
+    OCR extra's numpy/wordninja just to import this module.
+    """
+    from comic_reader import load_config as _load
+
+    return _load(path)
 
 
 def safe_image_url(url: str) -> bool:
@@ -149,15 +161,16 @@ def page_urls(html: str) -> list[str]:
     """The reader images on a chapter page, in page order.
 
     Real chapter images are lazy-loaded: ``src`` is a placeholder loader and the
-    address to fetch is in ``data-src``. Reading ``src`` downloads the loader
-    GIF. Off-site URLs are dropped here as well as at fetch time, so nothing
-    downstream ever holds one.
+    address to fetch is in ``data-src``. Only ``data-src`` is read -- the
+    placeholder lives on ``comic-site.test`` too, so it would pass
+    ``safe_image_url`` and be downloaded as if it were a page. Off-site URLs are
+    dropped here as well as at fetch time, so nothing downstream ever holds one.
     """
 
     soup = BeautifulSoup(html, "html.parser")
     urls: list[str] = []
     for img in soup.select("img.wp-manga-chapter-img"):
-        url = (img.get("data-src") or img.get("src") or "").strip()
+        url = (img.get("data-src") or "").strip()
         if url and safe_image_url(url):
             urls.append(url)
     return urls
