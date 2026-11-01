@@ -92,3 +92,28 @@ def test_a_missing_manifest_is_empty(tmp_path: Path):
 def test_an_empty_listing_keeps_what_is_already_known():
     first = assign(_empty(), NEWEST_FIRST)
     assert assign(first, []).chapters == first.chapters
+
+
+def test_each_retroactive_insertion_reports_its_own_ordinal(capsys):
+    # 173 and 174.5 are inserted in the middle of the reading order, so both
+    # land at the end. Each note must name its own ordinal, not the final max.
+    first = assign(_empty(), NEWEST_FIRST)
+    capsys.readouterr()  # drop anything from the setup call
+    listing = [
+        ("chapter-177", "Chapter 177"),
+        ("chapter-175-19", "Chapter 175.19"),
+        ("chapter-175", "Chapter 175"),
+        ("chapter-174-5", "Chapter 174.5"),
+        ("chapter-174", "Chapter 174"),
+        ("chapter-173", "Chapter 173"),
+    ]
+
+    second = assign(first, listing)
+
+    assert capsys.readouterr().out.splitlines() == [
+        "note: Chapter 173 is listed before Chapter 174 but was appended as chapter 5",
+        "note: Chapter 174.5 is listed before Chapter 175 but was appended as chapter 6",
+    ]
+    assert ordinal_of_label(second, "Chapter 173") == 5
+    assert ordinal_of_label(second, "Chapter 174.5") == 6
+

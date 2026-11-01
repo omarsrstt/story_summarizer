@@ -136,42 +136,43 @@ def assign(manifest: Manifest, listing: list[tuple[str, str]]) -> Manifest:
     slugs_in_listing = {slug for slug, _ in listing}
 
     # Walk the listing in reading order (oldest first)
-    # Known slugs keep their records; unknown slugs get new ordinals at the end
+    # Known slugs keep their records; unknown slugs get new ordinals at the end.
+    # The note is emitted here, where the record and its ordinal are both in hand:
+    # recomputing the number afterwards reports the manifest's final maximum instead
+    # of the ordinal this chapter was actually given.
     new_chapters: list[ChapterRecord] = []
 
-    for slug, label in reversed_listing:
+    for position, (slug, label) in enumerate(reversed_listing):
         if slug in existing_by_slug:
             # Known chapter - keep its record unchanged
             new_chapters.append(existing_by_slug[slug])
-        else:
-            # Unknown chapter - assign next ordinal at the end
-            max_ordinal += 1
-            new_record = ChapterRecord(
-                ordinal=max_ordinal,
-                slug=slug,
-                label=label,
-                number=parse_label_number(label),
-            )
-            new_chapters.append(new_record)
+            continue
 
-    # Now handle retroactive insertions: if an unknown slug appears BEFORE
-    # a known slug in the original (newest-first) listing, we need to report it.
-    # The listing was newest-first, so we walk it and detect when an unknown slug
-    # appears before a known one.
-    for i, (slug, label) in enumerate(listing):
-        if slug not in existing_by_slug:
-            # This is a new chapter. Check if it appears before any known chapter.
-            # In newest-first order, anything before this position is "newer" (higher ordinal).
-            # We need to find chapters that are OLDER (lower ordinal) than this one.
-            for j in range(i + 1, len(listing)):
-                later_slug, later_label = listing[j]
-                if later_slug in existing_by_slug:
-                    # The unknown slug appears before this known slug in newest-first order,
-                    # which means in reading order (oldest-first), the known slug comes first.
-                    # So the unknown chapter should come AFTER the known one, but we appended it.
-                    # Print the note using the newly-appended chapter's label first.
-                    print(f"note: {label} is listed before {later_label} but was appended as chapter {max_ordinal}")
-                    break
+        # Unknown chapter - assign next ordinal at the end
+        max_ordinal += 1
+        new_record = ChapterRecord(
+            ordinal=max_ordinal,
+            slug=slug,
+            label=label,
+            number=parse_label_number(label),
+        )
+        new_chapters.append(new_record)
+
+        # A known chapter that follows this one in reading order means the site
+        # inserted this chapter before it, so it has been appended out of position.
+        next_known_label = next(
+            (
+                later_label
+                for later_slug, later_label in reversed_listing[position + 1 :]
+                if later_slug in existing_by_slug
+            ),
+            None,
+        )
+        if next_known_label is not None:
+            print(
+                f"note: {label} is listed before {next_known_label} "
+                f"but was appended as chapter {new_record.ordinal}"
+            )
 
     # Keep records for slugs no longer in the listing (site temporarily dropped a chapter)
     for slug, record in existing_by_slug.items():
