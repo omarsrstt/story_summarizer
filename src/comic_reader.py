@@ -36,6 +36,27 @@ CHAPTER_PATTERNS = (
     re.compile(r"^chapter[_-]?(\d+)[_-](\d+)\.(?:jpg|jpeg|png|webp)$", re.IGNORECASE),
 )
 
+PAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
+
+def page_filename(ordinal: int, page: int, ext: str) -> str:
+    """The file name for one page of chapter ``ordinal``.
+
+    Zero-padding both numbers keeps lexical order equal to reading order, which
+    is what lets ``group_chapters`` sort by name alone.
+    """
+
+    normalised = ext.strip().lower()
+    if not normalised.startswith("."):
+        normalised = "." + normalised
+    if normalised not in PAGE_EXTENSIONS:
+        raise ValueError(
+            f"unsupported page extension {ext!r}; expected one of "
+            f"{sorted(PAGE_EXTENSIONS)}"
+        )
+    return f"c_{ordinal:06d}_{page:03d}{normalised}"
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
