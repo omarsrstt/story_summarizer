@@ -28,7 +28,12 @@ scraper = [
 web = [
     "flask",
 ]
+# Needed to read comics (src/comic_reader.py): images -> chapter text.
+# Kept out of the default install so the summariser stays lean.
 comic = [
+    "numpy>=2.2.6",
+    "pillow>=12.3.0",
+    "rapidocr-onnxruntime",
     "wordninja>=2.0.0",
 ]
 

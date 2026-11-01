@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Settings for src/comic_reader.py, the image -> text stage.",
+    "",
+    "glossary: names and story terms the OCR segmenter must never split.",
+    "Nothing in a page's text distinguishes 'sap in' from 'block him from', so a",
+    "lowercase name like Ashbern reads as two English words and only this list",
+    "keeps it whole. Add to it whenever a recap mangles a name.",
+    "",
+    "tile_height: a continuous scroll is cut into tiles this tall because the",
+    "detector only handles regions roughly the size of its input. Overlap keeps",
+    "a bubble straddling a seam whole in at least one tile; duplicates across a",
+    "seam are dropped when the transcript is assembled.",
+    "",
+    "comics_dir / transcripts_dir / novels_dir resolve relative to the repo",
+    "root (parent of src/), matching summarizer_config.json."
+  ],
+
+  "comics_dir": "comics",
+  "transcripts_dir": "transcripts",
+  "novels_dir": "novels",
+
+  "tile_height": 1200,
+  "tile_overlap": 120,
+
+  "glossary": [
+    "ARTHUR",
+    "LEYWN",
+    "REY",
+    "SYLPHIE",
+    "ALICE",
+    "ELIJAH",
+    "VIRION",
+    "TESSIA",
+    "SAPIN",
+    "DARV",
+    "ELENOIR",
+    "XYRUS",
+    "DICATHEN",
+    "ASHBERN",
+    "ETISTIN",
+    "KALBERK",
+    "MAYBUR",
+    "TELMORE",
+    "BURIM",
+    "ZESTIER",
+    "MARLOW",
+    "EEKSIRE",
+    "VALDEN",
+    "SLORE",
+    "EXIERA",
+    "TURTLEME",
+    "MANA",
+    "CONJURER",
+    "AUGMENTER",
+    "XENIA"
+  ]
+}

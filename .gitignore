@@ -175,6 +175,8 @@ src/config.json
 novels/
 summaries/
 comics/
+# Structured OCR transcripts (the readable chapter_NNNN.txt lives under novels/)
+transcripts/
 
 # Local scraper config (holds real site URLs) -- see scraper_config.example.json
 src/scraper_config.json

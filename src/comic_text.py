@@ -58,6 +58,16 @@ def clean_ocr_text(text: str) -> str:
     return text.strip()
 
 
+# The segmenter's own word list (126k entries). Used as evidence of whether a
+# run is text at all: "kwni" and "dwhhl" are in no dictionary, so keeping them
+# only clutters the transcript.
+_DICTIONARY = wordninja.DEFAULT_LANGUAGE_MODEL._wordcost
+
+
+def _is_known_word(run: str) -> bool:
+    return run.lower() in _DICTIONARY
+
+
 def _is_mixed_case(run: str) -> bool:
     """True if ``run`` has a capital after its first letter *and* a lowercase.
 
@@ -73,17 +83,18 @@ def _is_mixed_case(run: str) -> bool:
 def _should_split(run: str) -> bool:
     """Whether a single alphabetic run is several words missing their spaces.
 
-    Three guards, each measured against real OCR rather than guessed:
+    The decisive test is whether the split produces real words. Measured on a
+    real chapter, that separates the cases cleanly where length alone did not:
 
-    * ``_MIN_RUN`` -- short proper nouns ("SAPIN", "XYRUS") and noise ("KWNI")
-      are all 5 letters or fewer, while every genuinely fused word was 6+.
-    * a capital after the first letter marks a name ("TurtleMe", "Fuyuki").
-    * a split containing a one-letter fragment ("color is t") is damage, not a
-      repaired word.
+    * every genuine fused run split into dictionary words ("BLOCKHIMFROM" ->
+      block/him/from, 143 runs)
+    * noise and proper nouns did not ("KWNI", "dWHHL" split into non-words;
+      "ELENOIR", "SAPIN" are in no English dictionary)
 
-    No separate contraction check is needed: the segmenter already returns a
-    single part for real contractions ("doesn't", "isn't"), while a fused run
-    that merely ends in one ("THINKSI'VE") still splits into several.
+    A capital after the first letter marks a name outright ("TurtleMe"), and a
+    split containing a one-letter fragment ("color is t") is damage rather than
+    a repaired word. Contractions need no special case: the segmenter returns a
+    single part for "doesn't", while "THINKSI'VE" still splits.
     """
 
     if len(run) < _MIN_RUN or _is_mixed_case(run):
@@ -91,12 +102,11 @@ def _should_split(run: str) -> bool:
     parts = wordninja.split(run.lower())
     if len(parts) <= 1:
         return False
-    # A one-letter fragment is damage ("color is t", "ze s tier"), unless it is
-    # the pronoun/determiner a segmenter legitimately splits off ("IS A LITTLE").
-    for part in parts:
-        if len(part) == 1 and part not in ("a", "i"):
-            return False
-    return True
+    if any(len(part) == 1 and part not in ("a", "i") for part in parts):
+        return False
+    # Every part must be a real word, otherwise this is a name or noise and
+    # splitting it can only make it worse.
+    return all(_is_known_word(part) for part in parts)
 
 
 def looks_concatenated(text: str) -> bool:
@@ -147,6 +157,34 @@ def resegment(text: str, known: list[str] | None = None) -> str:
         return _split_run(run, protected)
 
     return _RUN.sub(split_run, text)
+
+
+def is_meaningful(text: str, known: list[str] | None = None) -> bool:
+    """Whether a block contains any real text rather than detector noise.
+
+    Comic pages carry specular highlights, page numbers and panel borders that
+    the detector reads as glyphs. Keeping those only clutters a transcript the
+    summariser has to read, so a block is kept only if it contains a dictionary
+    word, a glossary term, or a run that splits into real words.
+    """
+
+    protected = {name.lower().strip() for name in (known or [])}
+    for run in _RUN.findall(text):
+        low = run.lower()
+        if low in protected:
+            return True
+        # Single letters are in the dictionary ("m", "o"), so a lone one is
+        # page furniture rather than a word.
+        if len(low) >= 2 and _is_known_word(low):
+            return True
+        parts = wordninja.split(low)
+        if (
+            len(parts) > 1
+            and all(len(part) > 1 or part in ("a", "i") for part in parts)
+            and all(_is_known_word(part) for part in parts)
+        ):
+            return True
+    return False
 
 
 def words_in(text: str) -> int:

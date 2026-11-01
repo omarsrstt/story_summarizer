@@ -8,6 +8,7 @@ segmenter recovers them -- but that same segmenter shreds proper nouns
 from comic_text import (
     clean_ocr_text,
     has_cjk,
+    is_meaningful,
     looks_concatenated,
     resegment,
     words_in,
@@ -208,3 +209,44 @@ def test_words_in_counts_split_words_not_character_runs():
 def test_words_in_ignores_pure_punctuation():
     assert words_in("...") == 0
     assert words_in("+") == 0
+
+
+# -- deciding whether a block carries any real text ------------------------
+
+
+def test_a_sentence_of_real_words_is_meaningful():
+    assert is_meaningful("he doesn't hit that corner")
+    assert is_meaningful("A KING.")
+
+
+def test_a_glossary_name_alone_is_meaningful():
+    # The map page is mostly place names, which no English dictionary knows.
+    assert is_meaningful("ELENOIR", known=["ELENOIR"])
+    assert is_meaningful("SAPIN", known=["SAPIN"])
+
+
+def test_fused_dialogue_is_meaningful():
+    assert is_meaningful("HEDOESN'THIT")
+
+
+def test_detector_noise_is_not_meaningful():
+    # Specular highlights and page furniture, all observed in real output.
+    for junk in ("dWHHL", "CNHL", "213.", "+", "/", "7"):
+        assert not is_meaningful(junk), f"{junk!r} was kept"
+
+
+def test_some_noise_survives_and_that_is_accepted():
+    # The word list contains abbreviations like "nih" and "lii", so this block
+    # is kept. Dropping it would need a stricter rule that starts discarding
+    # real text, which costs a summary more than one stray line.
+    assert is_meaningful("NIHLII")
+
+
+def test_a_single_stray_letter_is_not_meaningful():
+    assert not is_meaningful("m")
+    assert not is_meaningful("l")
+
+
+def test_empty_text_is_not_meaningful():
+    assert not is_meaningful("")
+    assert not is_meaningful("   ")
