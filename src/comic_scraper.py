@@ -52,9 +52,6 @@ CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
 SITE = "https://comic-site.test"
 
-#: Magic bytes, so an error page served with a ``.jpg`` name is not kept.
-IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"RIFF", b"GIF8")
-
 #: The extensions a page image may carry. Anything else is refused rather than
 #: guessed, because a wrong extension is a file the reader cannot group.
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
@@ -177,10 +174,6 @@ def page_urls(html: str) -> list[str]:
 
 
 # -- network ---------------------------------------------------------------
-
-
-def _looks_like_image(payload: bytes) -> bool:
-    return any(payload.startswith(magic) for magic in IMAGE_MAGIC)
 
 
 def open_session():
