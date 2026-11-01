@@ -1,10 +1,38 @@
-"""Tests for the comic -> chapter-text driver's filename grouping."""
+"""Tests for the comic -> chapter-text driver's filename grouping and slug."""
 
 from pathlib import Path
 
 import pytest
 
-from comic_reader import group_chapters, parse_only
+from comic_reader import comic_slug, group_chapters, parse_only
+
+
+# -- keeping comics off the novels' namespaces ----------------------------
+
+
+def test_a_series_becomes_a_prefixed_slug():
+    assert comic_slug("TBATE") == "comic-TBATE"
+    assert comic_slug("  TBATE  ") == "comic-TBATE"
+
+
+def test_prefixing_is_idempotent():
+    # Re-running with the slug the script itself printed must not stack prefixes.
+    assert comic_slug("comic-TBATE") == "comic-TBATE"
+    assert comic_slug("COMIC-TBATE") == "comic-TBATE"
+
+
+def test_the_slug_can_never_collide_with_a_novel():
+    # A comic called "Tensei Slime" must not land on novels/tensei-slime, or
+    # it would overwrite a novel of that name -- the whole point of the prefix.
+    assert comic_slug("the-beginning-after-the-end") == (
+        "comic-the-beginning-after-the-end"
+    )
+
+
+def test_a_slug_that_would_escape_the_output_tree_is_rejected():
+    for bad in ("..", "../etc", "a/b", "a\\b", ""):
+        with pytest.raises(ValueError):
+            comic_slug(bad)
 
 
 def _touch(directory: Path, name: str) -> None:

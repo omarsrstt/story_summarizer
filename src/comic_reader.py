@@ -39,6 +39,28 @@ CHAPTER_PATTERNS = (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
+#: Comics are read into their own namespace. A comic and a novel can share a
+#: name ("TBATE" is both a comic here and a plausible novel title), and both
+#: resolve to ``<root>/<slug>``, so an unprefixed slug would let one overwrite
+#: the other's transcripts and summaries.
+COMIC_PREFIX = "comic-"
+
+
+def comic_slug(series: str) -> str:
+    """Map a series name to the slug used under ``novels/`` and ``summaries/``.
+
+    Idempotent, so re-running with the slug the script printed is harmless, and
+    hostile to path separators: the slug becomes a directory name directly.
+    """
+
+    name = series.strip()
+    if name.lower().startswith(COMIC_PREFIX):
+        name = name[len(COMIC_PREFIX):]
+    name = name.strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError(f"Not usable as a series name: {series!r}")
+    return COMIC_PREFIX + name
+
 
 def load_config(path: Path | None = None) -> dict:
     """Read ``comic_config.json``; missing keys fall back to sensible defaults."""
@@ -208,8 +230,13 @@ def main(argv: list[str] | None = None) -> int:
     chapters = group_chapters(image_dir)
     selected = parse_only(args.only, sorted(chapters))
 
-    novels_dir = REPO_ROOT / config.get("novels_dir", "novels") / args.series
-    source_dir = REPO_ROOT / config.get("transcripts_dir", "transcripts") / args.series
+    try:
+        slug = comic_slug(args.series)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+
+    novels_dir = REPO_ROOT / config.get("novels_dir", "novels") / slug
+    source_dir = REPO_ROOT / config.get("transcripts_dir", "transcripts") / slug
     novels_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Series:  {args.series}")
@@ -255,6 +282,10 @@ def main(argv: list[str] | None = None) -> int:
             f"  chapter {chapter}: {len(paths)} image(s), {len(blocks)} block(s), "
             f"{words} words in {elapsed:.1f}s -> {target.name}"
         )
+
+    # The reader owns the slug, so print the next command's argument rather than
+    # leaving the caller to reconstruct "comic-" by hand.
+    print(f'\nSummarise with:  uv run python src/summarize.py -n "{slug}"')
 
     return 0
 

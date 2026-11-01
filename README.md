@@ -168,13 +168,22 @@ anything can summarize them. `src/comic_reader.py` does only that, writing
 ```bash
 uv sync --extra comic
 uv run python src/comic_reader.py --series TBATE --comics comics/TBATE --only 1-5
-uv run python src/summarize.py -n TBATE -c 1-5 -g 5 --digest
+uv run python src/summarize.py -n comic-TBATE -c 1-5 -g 5 --digest
 ```
 
-   - `--series`: slug; output goes to `novels/<slug>/`.
+   - `--series`: series name; the reader prefixes it to form the slug.
    - `--comics`: directory of page images.
    - `--only`: `all`, `1`, `1-3` (default: all).
    - `--overwrite`: re-read chapters that already have a transcript.
+
+#### Comics get their own slug
+
+`--series TBATE` writes to `novels/comic-TBATE/`, so the summariser is then run with
+`-n comic-TBATE` and everything lands in `summaries/comic-TBATE/`. The `comic-` prefix is applied
+by the reader, because a comic and a novel can share a name — both resolve to `<root>/<slug>`, so
+an unprefixed slug would let one overwrite the other's transcripts and summaries. The reader
+prints the exact `-n` value to use when it finishes, and re-running with the slug it printed does
+not stack prefixes.
 
 Both page layouts work: one image per reader page (`c_1_07.jpg`) and a whole chapter stitched
 into one continuous scroll (`c_0_1.jpg`, 45 722 px tall). A scroll is cut into overlapping tiles
