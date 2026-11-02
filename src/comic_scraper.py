@@ -50,7 +50,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from comic_manifest import ChapterRecord
+from comic_manifest import ChapterRecord, Manifest, save_manifest
 from scraper_fast import (  # noqa: F401 - re-exported
     _with_retries,
     bytes_transport,
@@ -338,7 +338,274 @@ def open_session():
     return requests.Session(impersonate="chrome")
 
 
+# -- deciding what not to download -----------------------------------------
+
+
+def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
+    """Fill in ``record.pages`` and ``record.content_hash`` without saving a page.
+
+    One GET for the chapter page and one for page 1: the count of listed pages,
+    plus a fingerprint of the first one. That is the minimum needed to decide
+    whether two chapters are the same before any bytes are written -- the whole
+    point is that a duplicate costs one request, not eighty.
+
+    Nothing is written to disk. The hash is the empty string when page 1 cannot
+    be fetched, is not an image, or is an image that will not decode, which
+    ``mark_duplicates`` treats as "not a candidate" rather than as a value two
+    chapters can share.
+
+    Raises ``ScrapeError`` on a non-200 or a Cloudflare challenge, matching
+    ``download_chapter``: a challenge page lists zero images, and recording that
+    as a zero-page chapter would hide the fact that nothing was scanned.
+    """
+
+    from comic_images import average_hash, looks_like_image
+
+    url = chapter_url(series_url, record.slug)
+    status, body = default_transport(url, {}, {})
+    if status != 200:
+        raise ScrapeError(f"{record.label}: HTTP {status} at {url}")
+    if looks_like_challenge(body):
+        raise ScrapeError(
+            f"{record.label}: Cloudflare challenge instead of the chapter page "
+            f"at {url}. A challenge page lists no images, so it cannot be "
+            "scanned for duplicates."
+        )
+
+    urls = page_urls(body)
+    record.pages = len(urls)
+    # Only page 1 is fetched. Pages 2-10 of the real duplicate pairs measured
+    # 0 bits apart on the average hash, so one page settles it; hashing all of
+    # them would cost a chapter's bandwidth to answer the same question.
+    record.content_hash = ""
+    if urls:
+        status, payload = bytes_transport(urls[0], {"Referer": series_url}, {})
+        if status == 200 and looks_like_image(payload):
+            try:
+                record.content_hash = average_hash(payload)
+            except ValueError:
+                # Magic bytes but no decodable picture: a response cut off
+                # mid-transfer still starts like a JPEG. ``looks_like_image``
+                # is a prefix test and cannot see that, but ``average_hash``
+                # decodes and does. One truncated page must not abort a scan of
+                # the whole series, so it reads as unhashable instead.
+                print(f"{record.label}: page 1 has image magic bytes but is not decodable")
+
+    print(
+        f"{record.label}: scanned {record.pages} pages, "
+        f"hash {'none' if not record.content_hash else record.content_hash[:12]}"
+    )
+    return record
+
+
+def mark_duplicates(records: list[ChapterRecord]) -> None:
+    """Mark every chapter that duplicates another, keeping one from each group.
+
+    Chapters are grouped by ``content_hash`` and, within a group, the record with
+    the most pages survives; ties go to the one earliest in reading order. Every
+    other member gets ``duplicate_of`` set to the survivor's ordinal, which is
+    what lets ``run`` skip it before fetching anything.
+
+    An empty hash is never grouped. A chapter whose page 1 could not be fetched
+    has no fingerprint, and treating ``""`` as a value would make every
+    unhashable chapter a duplicate of the first one -- which, on a series where a
+    scan failure is routine, is most of the series.
+
+    Re-running this on an already-marked list is safe and is the intended use:
+    every flag is cleared as it is recomputed, so the answer is always the
+    current hashes' and never a mixture of this scan's and the last one's.
+
+    Mutates ``records`` in place; returns nothing so there is no second copy of
+    the answer to disagree with it.
+    """
+
+    groups: dict[str, list[ChapterRecord]] = {}
+    for record in records:
+        # A re-scan decides the whole question again, so a flag left from the
+        # previous run is cleared first: a chapter that stops hashing (its page 1
+        # failed this time) would otherwise stay marked as a duplicate of a
+        # chapter that is no longer known to be the same one.
+        record.duplicate_of = None
+        if not record.content_hash:
+            continue
+        groups.setdefault(record.content_hash, []).append(record)
+
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        # Most pages wins; a tie goes to the lower ordinal, i.e. the chapter
+        # earliest in reading order. Sorting on the ordinal explicitly makes the
+        # winner independent of the order the caller passed the records in --
+        # `max` alone would hand a tie to whichever came first *in the list*.
+        winner = max(group, key=lambda r: (r.pages, -r.ordinal))
+        for record in group:
+            if record is not winner:
+                record.duplicate_of = winner.ordinal
+
+
+def has_legacy_files(out_dir: Path) -> bool:
+    """Whether ``out_dir`` holds pages named before ordinals were pinned.
+
+    The old script wrote ``c_<chapter>_<page>.jpg`` with the chapter number
+    unpadded (``c_7_1.jpg``). ``comic_reader`` reads any digit run, so those
+    files would be merged into the new six-digit numbering -- chapter 7's old
+    pages and its new pages would both claim ``c_000007_*`` and every later
+    chapter would read as having twelve pages where it has ten.
+
+    The test is the width of the chapter digits, not the presence of the file:
+    six digits is the shape this module writes, anything else is the old one. A
+    missing directory has no files, so it is not legacy.
+    """
+
+    from comic_reader import CHAPTER_PATTERNS  # deferred: see module docstring
+
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return False
+    pattern = CHAPTER_PATTERNS[0]
+    for path in out_dir.iterdir():
+        match = pattern.match(path.name)
+        if match and len(match.group(1)) != 6:
+            return True
+    return False
+
+
 # -- the run ---------------------------------------------------------------
+
+
+def run(
+    series_url: str,
+    out_dir: Path,
+    manifest: Manifest,
+    plan: list[ChapterRecord],
+    *,
+    overwrite: bool = False,
+    delay: float = 0.4,
+    dry_run: bool = False,
+) -> int:
+    """Download ``plan`` into ``out_dir``, reporting honestly. Returns an exit code.
+
+    Duplicate detection is the caller's job, not this function's. A scan costs a
+    request per chapter and decides what should not be fetched at all, so it
+    belongs before the run, not inside it: the caller scans the plan, calls
+    ``mark_duplicates``, and passes the same records here. ``run`` only honours
+    ``duplicate_of`` flags that are already set. Scanning again here would fetch
+    page 1 twice for every chapter and would overwrite the page count of a
+    chapter that is already fully downloaded with the count of a page it cannot
+    see -- so ``run`` leaves ``record.pages`` to ``download_chapter``.
+
+    The manifest is saved after every chapter, including a failed one. That is
+    what makes an interrupted run resumable without renumbering: the ordinals
+    already handed out are on disk, so the next run assigns the same ones.
+
+    ``dry_run`` prints what each chapter would do -- ordinal, label, pages
+    already on disk -- and saves the manifest, but writes no pages.
+
+    The exit code is about what is on disk, not what this run did: ``0`` when
+    every non-duplicate chapter has pages on disk and none failed, ``1``
+    otherwise. A fully resumed run that downloaded nothing is a success; a run
+    that saved nothing is not.
+    """
+
+    out_dir = Path(out_dir)
+    manifest_path = out_dir / "chapters.json"
+
+    if has_legacy_files(out_dir):
+        print(
+            f"{out_dir} holds pages named before ordinals were pinned "
+            f"(c_<chapter>_<page>.jpg, e.g. c_7_1.jpg). Reading them alongside "
+            f"the new c_000007_001.jpg names would merge two chapters' pages. "
+            f"Archive them first:\n"
+            f"  mkdir -p unused/2026-11-01-pre-ordinal\n"
+            f"  move {out_dir}\\c_*_*.* unused/2026-11-01-pre-ordinal\\"
+        )
+        return 1
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failures: list[str] = []
+    skipped_duplicates = 0
+
+    for record in plan:
+        if record.duplicate_of is not None:
+            skipped_duplicates += 1
+            print(
+                f"{record.label} (chapter {record.ordinal}): skipped, duplicate "
+                f"of chapter {record.duplicate_of}"
+            )
+            continue
+
+        if dry_run:
+            on_disk = pages_on_disk(out_dir, record.ordinal)
+            print(
+                f"{record.label} (chapter {record.ordinal}): would download, "
+                f"{on_disk} page(s) already on disk"
+            )
+            # The manifest still records this chapter: a dry run that decided
+            # the numbering and then discarded it would assign different
+            # ordinals on the real run.
+            manifest.chapters = _with_record(manifest.chapters, record)
+            save_manifest(manifest_path, manifest)
+            continue
+
+        try:
+            result = download_chapter(
+                series_url, record, out_dir, overwrite=overwrite, delay=delay
+            )
+        except ScrapeError as exc:
+            # A refused chapter page still gets its manifest entry saved: the
+            # ordinal this run assigned to it must survive, or the next run
+            # would hand it a different one. It carries its cause verbatim and
+            # the run continues -- one unavailable chapter out of 400 is not a
+            # reason to abandon the other 399, and the exit code at the end
+            # still reports it.
+            print(f"{record.label}: FAILED: {exc}")
+            failures.append(f"{record.label}: {exc}")
+            manifest.chapters = _with_record(manifest.chapters, record)
+            save_manifest(manifest_path, manifest)
+            continue
+
+        manifest.chapters = _with_record(manifest.chapters, record)
+        # Saved per chapter, before the next one starts: an interrupted run keeps
+        # every ordinal it has already assigned.
+        save_manifest(manifest_path, manifest)
+
+        if result.failed > 0:
+            failures.append(
+                f"{record.label}: {result.failed} page(s) failed"
+            )
+        if result.on_disk == 0:
+            failures.append(f"{record.label}: no pages on disk")
+
+    print(
+        f"{len(plan)} chapter(s) in the plan: "
+        f"{len(plan) - skipped_duplicates} to download, "
+        f"{skipped_duplicates} duplicate(s) skipped"
+    )
+    if failures:
+        print(f"{len(failures)} problem(s):")
+        for line in failures:
+            print(f"  {line}")
+        return 1
+    return 0
+
+
+def _with_record(
+    chapters: list[ChapterRecord], record: ChapterRecord
+) -> list[ChapterRecord]:
+    """``chapters`` with ``record`` stored by ordinal, appended when new.
+
+    The plan and the manifest can disagree -- a chapter added by this scan is
+    not in the manifest yet -- so the record is matched on ordinal and replaced
+    rather than assumed to be present. Replacing matters: the manifest is what
+    the next run reads its page counts and duplicate flags from.
+    """
+
+    for index, existing in enumerate(chapters):
+        if existing.ordinal == record.ordinal:
+            chapters[index] = record
+            return chapters
+    return chapters + [record]
 
 
 def main(argv: list[str] | None = None) -> int:
