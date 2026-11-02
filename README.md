@@ -194,7 +194,10 @@ uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n 
    - `-c`: **site labels**, e.g. `1-5,8` or `175.1-175.19`. This is not `summarize.py -c`,
      which takes ordinals — see below. A range spans the chapters *between* its endpoints in
      reading order, which is the only honest reading of `175.1-175.19`: `175.10` and `175.1` are
-     the same number but different labels, so counting in floats cannot name that set.
+     the same number but different labels, so counting in floats cannot name that set. A label
+     need not be numeric (`175.5a`, `280 - 237`) — it is matched as text. A selection that is
+     neither a label nor the word `all` on its own is refused (`-c chapter` is a typo, not "every
+     chapter"); `--all` is how you ask for everything.
    - `--ordinals`: positions in `chapters.json` instead of labels, e.g. `1-5,8`. Use this once
      the manifest exists and you want "chapter 144 of the download" rather than "Chapter 144".
    - `--from` / `--to`: a label range, inclusive, e.g. `--from 175.1 --to 176`.
@@ -218,6 +221,13 @@ chapter without renumbering the ones already downloaded, which matters because t
 chapters retroactively (all of `175.1`–`175.19` arrived between `175` and `176`). Reading order is
 the site's list order, not the numeric order of the labels: `175.1` comes *before* `175` in the
 list.
+
+Because ordinals are pinned, a retroactively inserted chapter is appended at the end — so a manifest
+can be out of step with the site's order. A range is still resolved by position, but if it walks past
+a chapter the site places inside it, the run **prints a warning naming the omitted chapter(s)** and
+then downloads the span. It warns rather than refuses because "1 through 6" is a servable request;
+it does not stay silent because a range that quietly drops a chapter is the one failure this design
+exists to prevent.
 
 **Filenames use the ordinal, not the site's number.** Pages are written as
 `c_<ordinal>_<page>.<ext>`, six digits on the ordinal and three on the page —
@@ -253,7 +263,9 @@ error naming the label it could not find; when the selection is a bare number it
 Only the host in `comic_config.json`'s `comic_site_host` and its subdomains are fetched, over
 HTTP(S) only; the pages inject obfuscated scripts that redirect to ad hosts, so off-site image URLs
 are refused and no JavaScript is ever executed. `comic_series_url` holds the series URL template,
-so the site's address lives in one place rather than in the code.
+so the site's address lives in one place rather than in the code. The host is read from that file
+once per run and falls back to the built-in default if the file is missing or malformed — a config
+typo makes the check permissive of nothing, but it never raises mid-download.
 
 The download exits non-zero if any chapter failed or ends with zero pages on disk, and the exit
 code reports what is *on disk*, not what this run fetched — so a fully resumed run is a success.

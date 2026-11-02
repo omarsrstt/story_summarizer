@@ -80,7 +80,13 @@ DEFAULT_SERIES_URL = "https://comic-site.test/manga/{slug}/"
 #: The host page images may come from. Overridable via ``comic_site_host``.
 DEFAULT_SITE_HOST = "comic-site.test"
 
-SITE = "https://comic-site.test"
+#: The resolved site host, read from the config once per process.
+#:
+#: ``page_urls`` asks about one URL per image -- forty times on a full chapter
+#: page, tens of thousands of times across a series -- so re-reading and
+#: re-parsing the file per answer is pure waste. ``None`` means "not read yet";
+#: tests reset it with ``monkeypatch.setattr(cs, "_SITE_HOST", None)``.
+_SITE_HOST: str | None = None
 
 #: The extensions a page image may carry. Anything else is refused rather than
 #: guessed, because a wrong extension is a file the reader cannot group.
@@ -105,6 +111,31 @@ def load_config(path=None):
     return _load(path)
 
 
+def site_host() -> str:
+    """The one host page images may come from, resolved once per process.
+
+    Reads ``comic_site_host`` from the config and caches it. A missing,
+    unreadable or malformed config falls back to ``DEFAULT_SITE_HOST`` rather
+    than raising: this answers a yes/no question about a URL, and a config typo
+    turning into a ``JSONDecodeError`` from inside ``page_urls`` would surface as
+    a traceback in a caller that only expects page URLs back.
+
+    The cache is a module global read *here*, so a test can reset it with
+    ``monkeypatch.setattr(comic_scraper, "_SITE_HOST", None)``.
+    """
+
+    global _SITE_HOST
+    if _SITE_HOST is None:
+        try:
+            host = load_config().get("comic_site_host")
+        except (OSError, ValueError):
+            # ValueError covers json.JSONDecodeError: a malformed file, not a
+            # site that moved, and not a reason to stop answering.
+            host = None
+        _SITE_HOST = (host or DEFAULT_SITE_HOST).lower()
+    return _SITE_HOST
+
+
 def safe_image_url(url: str) -> bool:
     """Whether ``url`` is a comic image on this site that may be fetched.
 
@@ -115,6 +146,9 @@ def safe_image_url(url: str) -> bool:
     The site's host comes from ``comic_site_host`` in the config rather than
     being spelled here, so moving the site is a config change. The signature
     keeps its single argument -- a caller asks about a URL, not about a config.
+
+    Never raises for a config problem, and never touches the disk after the
+    first call: see ``site_host``.
     """
 
     try:
@@ -123,9 +157,9 @@ def safe_image_url(url: str) -> bool:
         return False
     if parsed.scheme not in ("http", "https"):
         return False
-    site_host = (load_config().get("comic_site_host") or DEFAULT_SITE_HOST).lower()
     host = (parsed.hostname or "").lower()
-    return host == site_host or host.endswith("." + site_host)
+    site = site_host()
+    return host == site or host.endswith("." + site)
 
 
 def image_ext(url: str) -> str:
@@ -283,6 +317,22 @@ def parse_label_selection(text: str) -> list[float]:
     return [number for _, number in _label_terms(text)]
 
 
+def _exact_record(manifest: Manifest, text: str) -> ChapterRecord | None:
+    """The chapter whose label is ``text`` after folding, or ``None``.
+
+    This is the label-first match, kept as its own function so both
+    ``_record_for`` and the range splitting in ``select_plan`` use the same rule.
+    A site label need not be a number (``175.5a``, ``280 - 237``), so this is the
+    only comparison that can resolve one.
+    """
+
+    label = normalise_label(text)
+    for record in manifest.chapters:
+        if normalise_label(record.label) == label:
+            return record
+    return None
+
+
 def _record_for(manifest: Manifest, text: str) -> ChapterRecord:
     """The one chapter ``text`` names, or ``ValueError`` saying what is missing.
 
@@ -290,15 +340,21 @@ def _record_for(manifest: Manifest, text: str) -> ChapterRecord:
     so ``144`` and ``144.0`` resolve to different chapters. The number is only a
     fallback, within 0.05 -- enough for a label written ``Ch. 144`` where the
     user typed ``144``, not enough to reach the neighbouring ``144.1``.
+
+    The number is parsed **lazily**, and only after the exact-label match misses.
+    A label need not be numeric: the site publishes ``175.5a`` and
+    ``280 - 237``, and ``comic_manifest.parse_label_number`` supports the latter.
+    Parsing first would refuse a chapter that is present in the manifest under
+    exactly the name the user typed, which would make label-first matching a
+    promise the code does not keep.
     """
+
+    exact = _exact_record(manifest, text)
+    if exact is not None:
+        return exact
 
     label = normalise_label(text)
     number = _label_number(label)
-
-    for record in manifest.chapters:
-        if normalise_label(record.label) == label:
-            return record
-
     candidates = [
         candidate
         for candidate in manifest.chapters
@@ -315,17 +371,133 @@ def _record_for(manifest: Manifest, text: str) -> ChapterRecord:
     raise ValueError(f"label {label} is not in the chapter list{hint}")
 
 
+def _omitted_inside(
+    chapters: list[ChapterRecord],
+    span: list[ChapterRecord],
+    start: ChapterRecord,
+    end: ChapterRecord,
+) -> list[ChapterRecord]:
+    """Chapters the site places inside ``start``..``end`` but the span leaves out.
+
+    Two signals, because the ordinal one alone misses the case this exists for:
+
+    * The record's **ordinal** falls strictly between the endpoints' but its
+      record is not in the span. Only possible when the manifest itself is out of
+      ordinal order; a span is a contiguous slice, so for a sorted manifest this
+      can never fire.
+    * The record's **number** falls strictly between the endpoints' and its
+      ordinal sits past the earlier endpoint -- i.e. ``assign`` appended it after
+      the range had already been pinned. That is the real insertion shape: the
+      site renders ``5.1`` between 5 and 6, ``assign`` gives it ordinal 7, and a
+      range ending at 6 walks straight past it.
+
+    The ordinal half of the second signal is what keeps it quiet: on this site
+    ``175.1`` is listed *before* ``175``, so a range ``175-176`` also omits it
+    numerically -- but it was pinned earlier, is genuinely outside the range, and
+    warning about it would be noise on every such run.
+    """
+
+    inside = {record.ordinal for record in span}
+    low_ordinal, high_ordinal = sorted((start.ordinal, end.ordinal))
+    low_number, high_number = sorted((start.number, end.number))
+    earliest_ordinal = min(start.ordinal, end.ordinal)
+    return [
+        record
+        for record in chapters
+        if record.ordinal not in inside
+        and (
+            low_ordinal < record.ordinal < high_ordinal
+            or (
+                low_number < record.number < high_number
+                and record.ordinal > earliest_ordinal
+            )
+        )
+    ]
+
+
+def _warn_omitted_span(
+    chapters: list[ChapterRecord],
+    span: list[ChapterRecord],
+    start: ChapterRecord,
+    end: ChapterRecord,
+    part: str,
+) -> None:
+    """Name the chapters a range's span leaves out although the site places them inside.
+
+    Ordinal order is not site order. ``comic_manifest.assign`` appends a
+    retroactive chapter at ``max + 1``, so a chapter the site lists between two
+    others can carry an ordinal past both of them -- and its ordinal is what
+    ``-c`` and ``--from/--to`` navigate by. Concrete case: a manifest of chapters
+    1-6, then the site inserts ``5.1``; it gets ordinal 7 and sits after chapter 6
+    in the file. ``-c 1-6`` then returns chapters 1..6 and silently drops 5.1.
+
+    Printing rather than raising is deliberate: "1 through 6" is still a servable
+    request, and refusing would block the common case over a rare insertion. But
+    the omission is never silent.
+    """
+
+    omitted = _omitted_inside(chapters, span, start, end)
+    if not omitted:
+        return
+
+    names = ", ".join(f"{record.label} (ordinal {record.ordinal})" for record in omitted)
+    print(
+        f"warning: range {part} selects {start.label} to {end.label} by "
+        f"position and leaves out {names}, which the site lists inside that "
+        f"range. Add the missing label(s) explicitly if you want them.",
+        file=sys.stderr,
+    )
+
+
+def _selection_is_everything(text: str) -> bool:
+    """Whether ``text`` genuinely means every chapter; raise when it only looks like it.
+
+    Only the *omitted* argument (handled by the caller) or ``all`` on its own
+    means everything. Anything else that folds to nothing -- ``chapter``,
+    ``Chapter all``, ``  chapter  `` -- is a half-typed label, and reading it as
+    "all" would download the entire series (hundreds of requests, several
+    gigabytes) off something that looks like a deliberate plan. An empty
+    selection is a typo, never an instruction.
+
+    Kept as one function so ``parse_args`` can refuse it before the chapter-list
+    request and ``select_plan`` can refuse it on its own: two copies of this rule
+    would be two chances to disagree about what "everything" means.
+    """
+
+    folded = normalise_label(text)
+    if not folded:
+        raise ValueError(
+            f"{text.strip()!r} names no chapter: it is only the word 'chapter'. "
+            "Give a label like '175.1', a range like '1-5', or 'all' for every "
+            "chapter"
+        )
+    if folded != "all":
+        return False
+    if text.strip().casefold() == "all":
+        return True
+    raise ValueError(
+        f"{text.strip()!r} is not a chapter label: 'all' means every chapter "
+        "only on its own, so pass --all, or the label you actually meant"
+    )
+
+
 def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
     """The chapters ``text`` names, in manifest (reading) order.
 
     ``None`` or ``"all"`` means everything. Otherwise ``text`` is a comma list of
     site labels and label ranges, each resolved by ``_record_for``.
 
+    "Everything" is only ever the *omitted* argument or the word ``all`` on its
+    own; ``_selection_is_everything`` holds that rule and explains why a
+    selection that is non-empty but folds to nothing is refused.
+
     A range is a **span of the manifest**, not a run of numbers: it covers every
     chapter between its two endpoints in reading order. That is what the user
     means by ``175.1-175.19``, and it is the only way to select those chapters
     honestly -- ``175.10`` and ``175.1`` are the same number, but different
-    labels, so counting in floats cannot name the set.
+    labels, so counting in floats cannot name the set. A span that skips a
+    chapter the site lists inside it prints a warning naming the chapter; see
+    ``_warn_omitted_span``.
 
     A label that matches nothing is an error, not an empty selection: quietly
     downloading nothing because of a typo is worse than naming the label that was
@@ -334,8 +506,7 @@ def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
 
     if not text:
         return list(manifest.chapters)
-    selection = normalise_label(text)
-    if selection in ("", "all"):
+    if _selection_is_everything(text):
         return list(manifest.chapters)
 
     chapters = manifest.chapters
@@ -344,6 +515,13 @@ def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
         part = normalise_label(part)
         if not part:
             raise ValueError(f"empty selection in {text!r}")
+        # Exact label before range: the site publishes "Chapter 280 - 237", which
+        # both sides of this parser's ``-`` test would read as a numeric range.
+        # A label that is present under exactly the typed text is not a range.
+        exact = _exact_record(manifest, part)
+        if exact is not None:
+            chosen[exact.ordinal] = exact
+            continue
         if _is_range(part):
             start_text, _, end_text = part.partition("-")
             start, end = _record_for(manifest, start_text), _record_for(manifest, end_text)
@@ -354,7 +532,9 @@ def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
                     f"({start.label} is chapter {start.ordinal}, {end.label} is "
                     f"{end.ordinal})"
                 )
-            for record in chapters[first:last + 1]:
+            span = chapters[first:last + 1]
+            _warn_omitted_span(chapters, span, start, end, part)
+            for record in span:
                 chosen[record.ordinal] = record
         else:
             record = _record_for(manifest, part)
@@ -881,6 +1061,9 @@ def _is_range(text: str) -> bool:
     Both sides must be numbers: a single label can contain a hyphen
     (``chapter-175-1`` is the site's slug form of ``175.1``), and treating that
     as a range would silently select a span nobody asked for.
+
+    A caller that has the manifest must check for an exact label first: the site
+    publishes ``Chapter 280 - 237``, which reads as a numeric range here.
     """
 
     start, dash, end = text.partition("-")
@@ -899,10 +1082,10 @@ def _label_at(manifest: Manifest, label: str, flag: str) -> ChapterRecord:
 
     Uses ``_record_for`` rather than ``select_plan`` so a range cannot be passed
     where one label is expected: ``--from 1-5`` would otherwise silently mean
-    chapter 1.
+    chapter 1. A label that exists verbatim (``280 - 237``) is not a range.
     """
 
-    if _is_range(label):
+    if _exact_record(manifest, label) is None and _is_range(label):
         raise ScrapeError(f"{flag}: expected one label, not a range ({label!r})")
     try:
         return _record_for(manifest, label)
@@ -913,9 +1096,20 @@ def _label_at(manifest: Manifest, label: str, flag: str) -> ChapterRecord:
 def _bounds_selection(
     manifest: Manifest, from_label: str | None, to_label: str | None
 ) -> list[ChapterRecord]:
-    """Every chapter between two site labels, inclusive, in reading order."""
+    """Every chapter between two site labels, inclusive, in reading order.
+
+    An omitted bound defaults to the first/last chapter, so an empty manifest has
+    no bounds to default to -- and indexing it would raise ``IndexError`` from
+    under a caller that only handles ``ScrapeError``. It is refused by name
+    instead.
+    """
 
     chapters = manifest.chapters
+    if not chapters:
+        raise ScrapeError(
+            "--from/--to: the chapter list is empty, so there is no chapter to "
+            "bound the range with"
+        )
     start = _label_at(manifest, from_label, "--from") if from_label is not None else chapters[0]
     end = _label_at(manifest, to_label, "--to") if to_label is not None else chapters[-1]
     first, last = chapters.index(start), chapters.index(end)
@@ -924,7 +1118,13 @@ def _bounds_selection(
             f"--from {start.label!r} comes after --to {end.label!r} in reading "
             f"order (ordinals {start.ordinal} and {end.ordinal}); swap them"
         )
-    return chapters[first:last + 1]
+    span = chapters[first:last + 1]
+    # The same trap as -c: a retroactively inserted chapter can carry an ordinal
+    # past the bounds while sitting between them on the site.
+    _warn_omitted_span(
+        chapters, span, start, end, f"--from {start.label} --to {end.label}"
+    )
+    return span
 
 
 def prepare(args) -> Setup:
@@ -1044,10 +1244,29 @@ def parse_args(argv: list[str] | None = None):
                 "--from/--to cannot be combined with -c, --ordinals or --all")
     if args.chapters is not None and not args.chapters.strip():
         parser.error("-c needs a selection, e.g. -c 1-5")
+    if args.chapters is not None:
+        # Refused here, before ``prepare`` spends the chapter-list request: a
+        # selection like ``-c chapter`` must never read as "all", and the user
+        # should not wait on the network to be told the flag was mistyped.
+        try:
+            _selection_is_everything(args.chapters)
+        except ValueError as exc:
+            parser.error(f"-c: {exc}")
     if args.ordinals is not None and not args.ordinals.strip():
         parser.error("--ordinals needs a selection, e.g. --ordinals 1-5")
     if args.delay < 0:
         parser.error("--delay cannot be negative")
+    # ``-n`` becomes a path component directly, so it is held to the same rule as
+    # a reader series name -- one validator for the folder name in both stages,
+    # rather than a second copy here that can drift. Imported lazily like the
+    # module's other reader imports: a download-only install must not need the
+    # OCR extra to import this, and ``comic_slug`` alone needs none of it.
+    from comic_reader import comic_slug
+
+    try:
+        comic_slug(args.name)
+    except ValueError as exc:
+        parser.error(f"-n: {exc}")
     return args
 
 
@@ -1061,8 +1280,11 @@ def execute(setup: Setup, args) -> int:
     """
 
     if has_legacy_files(setup.out_dir):
-        # Checked before the scan, not after: a scan of a doomed tree is a
-        # request per chapter spent to reach a refusal already known here.
+        # Checked before the scan, not after. ``prepare`` has already spent the
+        # one chapter-list POST to build the plan, but the scan is the expensive
+        # half -- two requests per chapter, ~600 for a full series -- and it
+        # would be spent reaching a refusal this check can make from what is
+        # already on disk.
         print(archive_hint(setup.out_dir))
         return 1
 
@@ -1081,8 +1303,15 @@ def execute(setup: Setup, args) -> int:
             scanned.append(scan_chapter(setup.series_url, record))
         except ScrapeError as exc:
             # One unavailable chapter page must not abort the scan of the rest.
-            # The record stays unhashed, so it is not grouped as a duplicate and
-            # ``run`` will try it properly and report its own failure.
+            # The record IS cleared, though: ``load_manifest`` restored last
+            # run's ``content_hash`` and ``pages`` onto this object, and a
+            # chapter that could not be scanned this run has no fingerprint for
+            # this run. Leaving the old hash in place lets a *different* chapter
+            # hash against a stale value and be marked as its duplicate -- a real
+            # chapter skipped on the strength of a scan that failed. Trusting a
+            # stored flag as final is what this whole pass exists to prevent.
+            record.content_hash = ""
+            record.pages = 0
             print(f"{record.label}: scan skipped: {exc}")
             scanned.append(record)
 

@@ -175,6 +175,9 @@ src/config.json
 novels/
 summaries/
 comics/
+# Archived page trees (pre-ordinal names, superseded downloads). Exactly as
+# large as the live trees, so never committed.
+unused/
 # Structured OCR transcripts (the readable chapter_NNNN.txt lives under novels/)
 transcripts/
 

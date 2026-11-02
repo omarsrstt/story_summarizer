@@ -157,6 +157,50 @@ def test_an_ad_or_foreign_host_is_refused():
         assert not cs.safe_image_url(bad), bad
 
 
+def test_a_broken_config_does_not_make_a_url_check_raise(monkeypatch):
+    # A config typo must not surface as a JSONDecodeError from inside
+    # page_urls/scan_chapter/download_chapter, none of which expect it.
+    import json
+
+    monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(cs, "load_config", lambda path=None: json.loads("{not json"))
+
+    assert cs.safe_image_url("https://c1.comic-site.test/a/c_1_1.jpg")
+    assert not cs.safe_image_url("https://evil.example/a.jpg")
+
+
+def test_a_missing_config_falls_back_to_the_default_host(monkeypatch):
+    monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(cs, "load_config", lambda path=None: {})
+
+    assert cs.safe_image_url("https://c1.comic-site.test/a/c_1_1.jpg")
+
+
+def test_the_config_is_read_once_per_call_not_once_per_image(monkeypatch):
+    # 40 images on a page used to mean 40 reads and parses of the same file.
+    reads = []
+    monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(
+        cs, "load_config", lambda path=None: (reads.append(1), {"comic_site_host": "comic-site.test"})[1]
+    )
+    html = _page_html(
+        *[f"https://c4.comic-site.test/x/chapter_9/ch_9_{i}.jpg" for i in range(1, 41)]
+    )
+
+    assert len(cs.page_urls(html)) == 40
+    assert len(reads) == 1
+
+
+def test_the_host_cache_is_reset_by_the_module_global(monkeypatch):
+    # The reset mechanism the tests rely on, asserted directly: a cached host
+    # left over from an earlier test would silently decide later answers.
+    monkeypatch.setattr(cs, "_SITE_HOST", "other.example")
+    assert cs.safe_image_url("https://c1.other.example/a/c_1_1.jpg")
+    monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(cs, "load_config", lambda path=None: {"comic_site_host": "comic-site.test"})
+    assert cs.safe_image_url("https://c1.comic-site.test/a/c_1_1.jpg")
+
+
 # -- extensions, so a page is saved under one name -------------------------
 
 
@@ -528,3 +572,88 @@ def test_a_dry_run_writes_no_pages_but_still_saves_the_manifest(
     assert (tmp_path / "chapters.json").is_file()
     out = capsys.readouterr().out
     assert "3" in out and "Chapter 3" in out
+
+
+def test_a_failed_scan_cannot_lend_its_stale_hash_to_a_live_chapter(
+    tmp_path, monkeypatch
+):
+    # The manifest restores last run's hash onto each record. If a scan fails and
+    # the old hash survives, a *different* chapter that hashes to that value this
+    # run is marked as its duplicate -- one real chapter skipped on the strength
+    # of a scan that could not run.
+    stale = ChapterRecord(
+        ordinal=1, slug="chapter-1", label="Chapter 1", number=1.0,
+        pages=9, content_hash="f" * 64,
+    )
+    live = ChapterRecord(ordinal=2, slug="chapter-2", label="Chapter 2", number=2.0)
+    manifest = Manifest("T", SERIES, [stale, live])
+    cs.save_manifest(tmp_path / "chapters.json", manifest)
+
+    def page(url, headers, cookies):
+        if "chapter-1" in url:
+            return 500, ""
+        return 200, _page_html("https://c4.comic-site.test/x/chapter_2/ch_2_1.jpg")
+
+    monkeypatch.setattr(cs, "default_transport", page)
+    # Chapter 2 hashes to exactly the value chapter 1 carries from last run.
+    # ``scan_chapter`` imports it inside the function, so patch it at the source.
+    import comic_images
+
+    monkeypatch.setattr(comic_images, "average_hash", lambda payload: "f" * 64)
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, PAGE_IMAGE))
+
+    setup = cs.Setup(
+        SERIES, tmp_path, tmp_path / "chapters.json",
+        cs.load_manifest(tmp_path / "chapters.json"),
+        [stale, live],
+    )
+    args = cs.parse_args(["-n", "T", "-c", "1-2"])
+
+    cs.execute(setup, args)
+
+    saved = Manifest.from_dict(
+        json.loads((tmp_path / "chapters.json").read_text("utf-8"))
+    )
+    assert saved.chapters[0].content_hash == ""
+    assert saved.chapters[0].pages == 0
+    assert saved.chapters[1].duplicate_of is None
+
+
+# -- the plan is refused before it is fetched --------------------------------
+
+
+def test_a_name_that_escapes_the_comics_directory_is_refused():
+    # -n becomes a path component directly, so ../../escape would write outside
+    # comics/. comic_reader.comic_slug already refuses this exact shape.
+    for name in ("../escape", "a/b", "a\\b", "..", "."):
+        with pytest.raises(SystemExit):
+            cs.parse_args(["-n", name])
+
+
+def test_a_name_that_cannot_be_a_folder_is_a_clean_message(capsys):
+    with pytest.raises(SystemExit):
+        cs.parse_args(["-n", "../escape"])
+    err = capsys.readouterr().err
+    assert "-n:" in err and "escape" in err
+    assert "Traceback" not in err
+
+
+def test_an_empty_manifest_cannot_be_bounded():
+    # --from/--to default an omitted bound to the first/last chapter, which an
+    # empty manifest does not have; indexing it raised IndexError.
+    empty = Manifest("T", SERIES, [])
+    with pytest.raises(cs.ScrapeError, match="empty"):
+        cs._bounds_selection(empty, None, None)
+    with pytest.raises(cs.ScrapeError, match="empty"):
+        cs._bounds_selection(empty, "1", "2")
+
+
+def test_a_half_typed_label_is_refused_before_the_chapter_list_is_fetched(monkeypatch):
+    # parse_args must not let -c chapter through as "all" and then spend the
+    # chapter-list request to find out.
+    def boom(*args, **kwargs):
+        raise AssertionError("the chapter list must not be fetched")
+
+    monkeypatch.setattr(cs, "post_transport", boom)
+    with pytest.raises(SystemExit):
+        cs.main(["-n", "T", "-c", "chapter"])
