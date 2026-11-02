@@ -1,9 +1,10 @@
 """Read a comic series' chapter list and page images, on the fast scraper's stack.
 
 This is the stage ``comic_reader.py`` cannot do: getting the pictures at all.
-It saves them as ``c_<storage-chapter>_<page>.<ext>`` -- the naming the existing
-downloads already use and that ``comic_reader.group_chapters`` parses -- so the
-rest of the pipeline is unchanged.
+It saves them as ``c_<ordinal>_<page>.<ext>``, where the ordinal is the
+chapter's pinned position in reading order -- the naming
+``comic_reader.group_chapters`` parses -- so the rest of the pipeline is
+unchanged.
 
 What it reuses from the novel scraper, and why each one matters:
 
@@ -24,24 +25,27 @@ What it reuses from the novel scraper, and why each one matters:
 
 Two things about this site were measured, not assumed:
 
-* The reader's chapter N is stored on the CDN as ``chapter_<N-1>``. Chapter 1
-  is ``chapter_0/c_0_1.jpg``; chapter 2 is ``chapter_1/c_1_1.jpg``. The local
-  filename keeps the *storage* numbering, because that is what the existing
-  downloads use and what ``comic_reader`` groups on -- so a chapter can look off
-  by one in a filename and still be correct.
+* A chapter's reading-order position and its CDN directory number are different
+  things, and the CDN number cannot identify a chapter: the site files chapter N
+  under ``chapter_<N-1>``, and a re-upload can publish the same number again
+  (``Chapter 144`` and ``Chapter 144.0`` are two chapters that both carry 144.0).
+  Local files are therefore named by the ordinal pinned in ``chapters.json``,
+  which never changes once assigned.
 * The chapter list is *not* JavaScript-only, as it first appeared: a plain GET
   of the AJAX endpoint answers ``0``, but a POST carrying
   ``X-Requested-With: XMLHttpRequest`` returns all ~300 chapters in one
   response. Walking the next-chapter links was a workaround for a request we
   were making wrong, and it is gone.
 
-Only ``comic-site.test`` and its subdomains are fetched, over HTTP(S) only. The
-pages inject obfuscated scripts that redirect to ad hosts, so an off-site image
-URL is refused rather than followed, and no JavaScript is ever executed.
+Only the host named by ``comic_site_host`` in ``comic_config.json`` and its
+subdomains are fetched, over HTTP(S) only. The pages inject obfuscated scripts
+that redirect to ad hosts, so an off-site image URL is refused rather than
+followed, and no JavaScript is ever executed.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from dataclasses import dataclass
@@ -50,7 +54,14 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from comic_manifest import ChapterRecord, Manifest, save_manifest
+from comic_manifest import (
+    ChapterRecord,
+    Manifest,
+    assign,
+    load_manifest,
+    save_manifest,
+)
+from scraper import parse_chapter_input
 from scraper_fast import (  # noqa: F401 - re-exported
     _with_retries,
     bytes_transport,
@@ -61,6 +72,13 @@ from scraper_parse import looks_like_challenge
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
+
+#: Where a series lives, keyed by slug. Overridable via ``comic_series_url`` so
+#: the site can move without editing code.
+DEFAULT_SERIES_URL = "https://comic-site.test/manga/{slug}/"
+
+#: The host page images may come from. Overridable via ``comic_site_host``.
+DEFAULT_SITE_HOST = "comic-site.test"
 
 SITE = "https://comic-site.test"
 
@@ -93,6 +111,10 @@ def safe_image_url(url: str) -> bool:
     Rejects foreign hosts outright. ``comic-site.test.evil.example`` and
     ``http://comic-site.test@evil.example`` are different hosts despite reading
     like ours, and ``data:`` URLs carry no host at all.
+
+    The site's host comes from ``comic_site_host`` in the config rather than
+    being spelled here, so moving the site is a config change. The signature
+    keeps its single argument -- a caller asks about a URL, not about a config.
     """
 
     try:
@@ -101,8 +123,9 @@ def safe_image_url(url: str) -> bool:
         return False
     if parsed.scheme not in ("http", "https"):
         return False
+    site_host = (load_config().get("comic_site_host") or DEFAULT_SITE_HOST).lower()
     host = (parsed.hostname or "").lower()
-    return host == "comic-site.test" or host.endswith(".comic-site.test")
+    return host == site_host or host.endswith("." + site_host)
 
 
 def image_ext(url: str) -> str:
@@ -161,6 +184,183 @@ def fetch_chapter_list(series_url: str) -> list[tuple[str, str]]:
         if slug:
             chapters.append((slug, anchor.get_text(" ", strip=True)))
     return chapters
+
+
+# -- deciding which chapters ------------------------------------------------
+#
+# A site label is a chapter's identity; its number is not. The site publishes
+# "Chapter 144" and "Chapter 144.0" as two different chapters that both carry the
+# number 144.0, so selecting by number is ambiguous between them while selecting
+# by label is not. Everything below therefore matches labels first.
+
+
+def normalise_label(text: str) -> str:
+    """``text`` folded so a site label and a selection compare equal.
+
+    Case, a leading ``chapter`` and repeated whitespace are all noise: the site
+    writes ``Chapter 175.1``, a user types ``175.1``, and both name the same
+    chapter. Folding here keeps that rule in one place instead of at every call
+    site.
+    """
+
+    text = " ".join(text.split()).casefold()
+    if text.startswith("chapter"):
+        text = text[len("chapter"):]
+    return " ".join(text.split())
+
+
+def _label_number(text: str) -> float:
+    """The number in ``text``, or ``ValueError`` if it is not just a number."""
+
+    try:
+        return float(text.strip())
+    except ValueError:
+        raise ValueError(f"not a chapter label: {text!r}") from None
+
+
+def _decimals(text: str) -> int:
+    """How many digits ``text`` writes after the point (0 when it writes none).
+
+    This is what fixes a range's step: ``174-176`` steps by 1 and
+    ``175.1-175.5`` by 0.1, because that is how finely the endpoints are
+    written. Guessing a fixed 0.1 would make a whole-number range ask for
+    174.1, 174.2 ..., which the site does not publish.
+    """
+
+    _, dot, fraction = text.strip().partition(".")
+    return len(fraction) if dot else 0
+
+
+def _label_terms(text: str) -> list[tuple[str, float]]:
+    """``(label text, number)`` for every chapter a selection names.
+
+    The label text is kept separately from the number because the two are not
+    interchangeable: ``"144"`` and ``"144.0"`` are different labels that parse
+    to the same number, and only the text tells them apart.
+
+    A part containing ``-`` is an inclusive range. Values are counted from the
+    start and rounded to the endpoints' precision, because accumulating a
+    fractional step yields ``175.29999999999998``, which matches no label and
+    would silently select nothing.
+
+    Note that a float list cannot name ``175.10`` and ``175.1`` separately --
+    they are the same number. ``select_plan`` therefore treats a range as a
+    span of the manifest's labels rather than of this list; this parser is the
+    answer to "which numbers does the text mention".
+    """
+
+    terms: list[tuple[str, float]] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"empty selection in {text!r}")
+        if _is_range(part):
+            start_text, _, end_text = part.partition("-")
+            start, end = _label_number(start_text), _label_number(end_text)
+            places = max(_decimals(start_text), _decimals(end_text))
+            step = 10.0 ** -places
+            count = round((end - start) / step)
+            for index in range(count + 1):
+                number = round(start + index * step, places)
+                # ``:g`` keeps a whole number spelled "175", which is how the
+                # site writes one; "175.0" matches no label.
+                terms.append((f"{number:g}", number))
+        else:
+            terms.append((normalise_label(part), round(_label_number(part), 3)))
+    return terms
+
+
+def parse_label_selection(text: str) -> list[float]:
+    """The numbers named by a ``-c`` selection: ``"175.1"``, ``"144,150"``.
+
+    Raises ``ValueError`` on anything that is not numbers, ranges and commas; an
+    unreadable selection must not read as an empty one. This is the conversion a
+    human's selection goes through, not the matcher -- ``select_plan`` matches
+    the label text, because numbers alone cannot distinguish ``144`` from
+    ``144.0``.
+    """
+
+    return [number for _, number in _label_terms(text)]
+
+
+def _record_for(manifest: Manifest, text: str) -> ChapterRecord:
+    """The one chapter ``text`` names, or ``ValueError`` saying what is missing.
+
+    Labels first: ``normalise_label(record.label)`` is the site's own identifier,
+    so ``144`` and ``144.0`` resolve to different chapters. The number is only a
+    fallback, within 0.05 -- enough for a label written ``Ch. 144`` where the
+    user typed ``144``, not enough to reach the neighbouring ``144.1``.
+    """
+
+    label = normalise_label(text)
+    number = _label_number(label)
+
+    for record in manifest.chapters:
+        if normalise_label(record.label) == label:
+            return record
+
+    candidates = [
+        candidate
+        for candidate in manifest.chapters
+        if abs(candidate.number - number) <= 0.05
+    ]
+    if candidates:
+        return min(candidates, key=lambda c: c.ordinal)
+
+    hint = ""
+    if number % 1 == 0:
+        # -c takes labels and --ordinals takes positions; a plain number is the
+        # one input that reads the same in both, so name the other one.
+        hint = f" (if you meant position {int(number)}, use --ordinals)"
+    raise ValueError(f"label {label} is not in the chapter list{hint}")
+
+
+def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
+    """The chapters ``text`` names, in manifest (reading) order.
+
+    ``None`` or ``"all"`` means everything. Otherwise ``text`` is a comma list of
+    site labels and label ranges, each resolved by ``_record_for``.
+
+    A range is a **span of the manifest**, not a run of numbers: it covers every
+    chapter between its two endpoints in reading order. That is what the user
+    means by ``175.1-175.19``, and it is the only way to select those chapters
+    honestly -- ``175.10`` and ``175.1`` are the same number, but different
+    labels, so counting in floats cannot name the set.
+
+    A label that matches nothing is an error, not an empty selection: quietly
+    downloading nothing because of a typo is worse than naming the label that was
+    not found.
+    """
+
+    if not text:
+        return list(manifest.chapters)
+    selection = normalise_label(text)
+    if selection in ("", "all"):
+        return list(manifest.chapters)
+
+    chapters = manifest.chapters
+    chosen: dict[int, ChapterRecord] = {}
+    for part in text.split(","):
+        part = normalise_label(part)
+        if not part:
+            raise ValueError(f"empty selection in {text!r}")
+        if _is_range(part):
+            start_text, _, end_text = part.partition("-")
+            start, end = _record_for(manifest, start_text), _record_for(manifest, end_text)
+            first, last = chapters.index(start), chapters.index(end)
+            if first > last:
+                raise ValueError(
+                    f"range {part} runs backwards in reading order "
+                    f"({start.label} is chapter {start.ordinal}, {end.label} is "
+                    f"{end.ordinal})"
+                )
+            for record in chapters[first:last + 1]:
+                chosen[record.ordinal] = record
+        else:
+            record = _record_for(manifest, part)
+            chosen[record.ordinal] = record
+
+    return [record for record in chapters if record.ordinal in chosen]
 
 
 # -- the pages --------------------------------------------------------------
@@ -470,6 +670,23 @@ def has_legacy_files(out_dir: Path) -> bool:
     return False
 
 
+def archive_hint(out_dir: Path) -> str:
+    """The message for a tree holding pages named before ordinals were pinned.
+
+    Two pasteable PowerShell lines, not a mix of Unix ``mkdir -p`` and a Windows
+    ``move``: the command is meant to be run, not read.
+    """
+
+    return (
+        f"{out_dir} holds pages named before ordinals were pinned "
+        f"(c_<chapter>_<page>.jpg, e.g. c_7_1.jpg). Reading them alongside the "
+        f"new c_000007_001.jpg names would merge two chapters' pages. Archive "
+        f"them first, from the repo root, into unused/2026-11-01-pre-ordinal:\n"
+        f"  mkdir unused\\2026-11-01-pre-ordinal\n"
+        f"  move {out_dir}\\c_*_*.* unused\\2026-11-01-pre-ordinal\\"
+    )
+
+
 # -- the run ---------------------------------------------------------------
 
 
@@ -511,14 +728,7 @@ def run(
     manifest_path = out_dir / "chapters.json"
 
     if has_legacy_files(out_dir):
-        print(
-            f"{out_dir} holds pages named before ordinals were pinned "
-            f"(c_<chapter>_<page>.jpg, e.g. c_7_1.jpg). Reading them alongside "
-            f"the new c_000007_001.jpg names would merge two chapters' pages. "
-            f"Archive them first:\n"
-            f"  mkdir -p unused/2026-11-01-pre-ordinal\n"
-            f"  move {out_dir}\\c_*_*.* unused/2026-11-01-pre-ordinal\\"
-        )
+        print(archive_hint(out_dir))
         return 1
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -608,23 +818,309 @@ def _with_record(
     return chapters + [record]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Not finished: the download loop is the next stage of this rewrite.
+# -- the command line -------------------------------------------------------
 
-    Deliberately a stub rather than the old CLI. The old one drove the
-    next-link walk that this change deletes, so keeping it would mean keeping
-    ``Run``/``scrape_chapters`` alive for nothing. Arguments are not parsed,
-    because advertising options the stub ignores is worse than refusing to run;
-    a later change gives this a real CLI.
+
+@dataclass
+class Setup:
+    """What ``main`` resolved before a single page is fetched.
+
+    Grouped so the plan can be printed (and, in a dry run, only printed) without
+    the setup code having written anything: the manifest is held in memory until
+    the caller decides the run is real.
     """
 
-    del argv
+    series_url: str
+    out_dir: Path
+    manifest_path: Path
+    manifest: Manifest
+    plan: list[ChapterRecord]
+
+
+def series_url_for(slug: str, config: dict | None = None) -> str:
+    """The series URL for ``slug``, from ``comic_series_url`` in the config."""
+
+    if config is None:
+        config = load_config()
+    template = config.get("comic_series_url") or DEFAULT_SERIES_URL
+    return template.format(slug=slug.strip("/"))
+
+
+def _ordinal_selection(manifest: Manifest, text: str) -> list[ChapterRecord]:
+    """The chapters at the manifest positions ``text`` names.
+
+    Positions are the ordinals in ``chapters.json``, which is why the integer
+    parser is the right tool here: an ordinal is always an integer, unlike a
+    site label, which can be ``175.1``.
+    """
+
+    try:
+        wanted = parse_chapter_input(text)
+    except ValueError:
+        raise ScrapeError(
+            f"--ordinals: cannot read {text!r}; expected positions like '1-5,8'"
+        ) from None
+    if not wanted:
+        raise ScrapeError(f"--ordinals: {text!r} names no position")
+
+    by_ordinal = {record.ordinal: record for record in manifest.chapters}
+    missing = [number for number in wanted if number not in by_ordinal]
+    if missing:
+        highest = max(by_ordinal, default=0)
+        raise ScrapeError(
+            f"--ordinals: no chapter at position(s) {missing}; the manifest has "
+            f"positions 1 to {highest}"
+        )
+    chosen = set(wanted)
+    return [record for record in manifest.chapters if record.ordinal in chosen]
+
+
+def _is_range(text: str) -> bool:
+    """Whether ``text`` is a label range like ``174-176``.
+
+    Both sides must be numbers: a single label can contain a hyphen
+    (``chapter-175-1`` is the site's slug form of ``175.1``), and treating that
+    as a range would silently select a span nobody asked for.
+    """
+
+    start, dash, end = text.partition("-")
+    if not dash or not start.strip() or not end.strip():
+        return False
+    try:
+        float(start)
+        float(end)
+    except ValueError:
+        return False
+    return True
+
+
+def _label_at(manifest: Manifest, label: str, flag: str) -> ChapterRecord:
+    """The single chapter ``label`` names, with the selection error made clean.
+
+    Uses ``_record_for`` rather than ``select_plan`` so a range cannot be passed
+    where one label is expected: ``--from 1-5`` would otherwise silently mean
+    chapter 1.
+    """
+
+    if _is_range(label):
+        raise ScrapeError(f"{flag}: expected one label, not a range ({label!r})")
+    try:
+        return _record_for(manifest, label)
+    except ValueError as exc:
+        raise ScrapeError(f"{flag}: {exc}") from None
+
+
+def _bounds_selection(
+    manifest: Manifest, from_label: str | None, to_label: str | None
+) -> list[ChapterRecord]:
+    """Every chapter between two site labels, inclusive, in reading order."""
+
+    chapters = manifest.chapters
+    start = _label_at(manifest, from_label, "--from") if from_label is not None else chapters[0]
+    end = _label_at(manifest, to_label, "--to") if to_label is not None else chapters[-1]
+    first, last = chapters.index(start), chapters.index(end)
+    if first > last:
+        raise ScrapeError(
+            f"--from {start.label!r} comes after --to {end.label!r} in reading "
+            f"order (ordinals {start.ordinal} and {end.ordinal}); swap them"
+        )
+    return chapters[first:last + 1]
+
+
+def prepare(args) -> Setup:
+    """Resolve the config, the chapter list, the manifest and the plan.
+
+    Nothing is written and no page is fetched: one chapter-list request is the
+    whole cost, so a dry run can stop here.
+    """
+
+    config = load_config()
+    series_url = series_url_for(args.slug, config)
+    out_dir = REPO_ROOT / config.get("comics_dir", "comics") / args.name
+    manifest_path = out_dir / "chapters.json"
+
+    manifest = load_manifest(manifest_path)
+    # The site and series are known from the arguments, so they are written
+    # rather than inherited: a manifest that disagrees with the URL it was built
+    # from is worse than one without them.
+    manifest.series = args.name
+    manifest.site = series_url
+
+    listing = fetch_chapter_list(series_url)
+    if not listing:
+        raise ScrapeError(f"the chapter list at {series_url} is empty")
+    manifest = assign(manifest, listing)
+
+    if args.ordinals is not None:
+        plan = _ordinal_selection(manifest, args.ordinals)
+    elif args.from_label is not None or args.to_label is not None:
+        plan = _bounds_selection(manifest, args.from_label, args.to_label)
+    else:
+        # ``select_plan`` treats None and "all" alike; ``--all`` and no selection
+        # both land here, and an ambiguous combination was refused in parse_args.
+        try:
+            plan = select_plan(manifest, args.chapters)
+        except ValueError as exc:
+            raise ScrapeError(f"-c: {exc}") from None
+
+    if not plan:
+        raise ScrapeError("the selection named no chapters")
+    return Setup(series_url, out_dir, manifest_path, manifest, plan)
+
+
+def print_plan(setup: Setup) -> None:
+    """Say what the resolved plan is, without asking the site anything else."""
+
+    plan = setup.plan
+    print(f"{setup.out_dir}  ({setup.series_url})")
     print(
-        "The comic download stage is being rebuilt and is not runnable yet: "
-        "the chapter list now comes from one request, but downloading the "
-        "pages is the next change."
+        f"resolved plan: {len(plan)} chapter(s), first {plan[0].label} "
+        f"(ordinal {plan[0].ordinal}), last {plan[-1].label} "
+        f"(ordinal {plan[-1].ordinal})"
     )
-    return 1
+    for record in plan:
+        print(f"  {record.ordinal:06d}  {record.label}")
+
+
+def parse_args(argv: list[str] | None = None):
+    """The download stage's arguments.
+
+    ``-c`` and ``--ordinals`` are separate flags on purpose: ``-c`` takes the
+    site's own labels, ``--ordinals`` takes positions in ``chapters.json``. They
+    overlap numerically often enough (``-c 144`` and ``--ordinals 144``) that one
+    flag would blur the distinction this stage exists to keep.
+    """
+
+    parser = argparse.ArgumentParser(
+        prog="comic_scraper.py",
+        description=(
+            "Download a comic series' pages into comics/<name>/, named by the "
+            "ordinal pinned in chapters.json."
+        ),
+        epilog=(
+            "A run scans one chapter page and one image per chapter before "
+            "downloading anything, so duplicate re-uploads are settled before "
+            "bytes are written. --dry-run skips that scan."
+        ),
+    )
+    parser.add_argument(
+        "-n", "--name", required=True,
+        help="Folder under comics/ to download into (required)")
+    parser.add_argument(
+        "--slug", default=None,
+        help="Series slug from the site URL (default: the value of --name)")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "-c", "--chapters", default=None, metavar="LABELS",
+        help="Site labels to download: '5', '1-5', '175.1-175.19', '144,150'")
+    selection.add_argument(
+        "--ordinals", default=None, metavar="POSITIONS",
+        help="Positions in chapters.json instead of site labels: '5', '1-5,8'")
+    selection.add_argument(
+        "--all", dest="select_all", action="store_true",
+        help="Download every chapter in the series")
+    parser.add_argument(
+        "--from", dest="from_label", default=None, metavar="LABEL",
+        help="First site label to download, inclusive")
+    parser.add_argument(
+        "--to", dest="to_label", default=None, metavar="LABEL",
+        help="Last site label to download, inclusive")
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Re-download pages that already exist")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Report the resolved plan without scanning or downloading")
+    parser.add_argument(
+        "--delay", type=float, default=0.4, metavar="SECONDS",
+        help="Pause before each page request (default: 0.4)")
+    args = parser.parse_args(argv)
+
+    if args.slug is None:
+        args.slug = args.name
+    if args.from_label is not None or args.to_label is not None:
+        if args.chapters or args.ordinals or args.select_all:
+            parser.error(
+                "--from/--to cannot be combined with -c, --ordinals or --all")
+    if args.chapters is not None and not args.chapters.strip():
+        parser.error("-c needs a selection, e.g. -c 1-5")
+    if args.ordinals is not None and not args.ordinals.strip():
+        parser.error("--ordinals needs a selection, e.g. --ordinals 1-5")
+    if args.delay < 0:
+        parser.error("--delay cannot be negative")
+    return args
+
+
+def execute(setup: Setup, args) -> int:
+    """Scan the plan for duplicates, then download it.
+
+    The scan always runs, even when the manifest already carries
+    ``duplicate_of``: that flag is this run's answer to a question about the
+    pages as they are now, and it is cleared and recomputed as the scan goes.
+    Trusting the file's value would let an old decision survive a re-upload.
+    """
+
+    if has_legacy_files(setup.out_dir):
+        # Checked before the scan, not after: a scan of a doomed tree is a
+        # request per chapter spent to reach a refusal already known here.
+        print(archive_hint(setup.out_dir))
+        return 1
+
+    setup.out_dir.mkdir(parents=True, exist_ok=True)
+    # Pinned before any page is written: an interrupted run then keeps the
+    # ordinals it had already decided, and the next run assigns the same ones.
+    save_manifest(setup.manifest_path, setup.manifest)
+
+    print(
+        f"scanning {len(setup.plan)} chapter(s) for duplicates: the chapter page "
+        f"and page 1 of each are fetched first, so no page is downloaded twice"
+    )
+    scanned: list[ChapterRecord] = []
+    for record in setup.plan:
+        try:
+            scanned.append(scan_chapter(setup.series_url, record))
+        except ScrapeError as exc:
+            # One unavailable chapter page must not abort the scan of the rest.
+            # The record stays unhashed, so it is not grouped as a duplicate and
+            # ``run`` will try it properly and report its own failure.
+            print(f"{record.label}: scan skipped: {exc}")
+            scanned.append(record)
+
+    mark_duplicates(scanned)
+    # Re-derived duplicates are only worth having if they are on disk: the next
+    # run reads this file, and a flag that exists only in memory is a decision
+    # nobody can inspect.
+    save_manifest(setup.manifest_path, setup.manifest)
+
+    return run(
+        setup.series_url,
+        setup.out_dir,
+        setup.manifest,
+        setup.plan,
+        overwrite=args.overwrite,
+        delay=args.delay,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Download a comic series' pages. Returns 0 on success, 1 on any failure."""
+
+    args = parse_args(argv)
+    try:
+        setup = prepare(args)
+        print_plan(setup)
+        if args.dry_run:
+            # Deliberately no scan: --dry-run answers "what would you download?",
+            # and a scan answers "which are duplicates?" -- a question the user
+            # did not ask, costing a request per chapter on a 300-chapter series.
+            print("dry run: nothing scanned, nothing written")
+            return 0
+        return execute(setup, args)
+    except ScrapeError as exc:
+        # A refusal that retrying will not fix, reported as one line: a traceback
+        # buries the cause, which is the whole message.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

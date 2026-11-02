@@ -180,36 +180,83 @@ uv run python src/summarize.py -n comic-TBATE -c 1-5 -g 5 --digest
 #### Downloading the pages
 
 `src/comic_scraper.py` gets the images into `comics/<name>/` so the reader has something to read.
-It reuses the novel scraper's parts rather than its own: `scraper_fast.default_transport` for the
-`curl_cffi` TLS impersonation the site's bot check demands (plus timeout/5xx retries and 429
-backoff), `scraper_parse.looks_like_challenge`, `scraper.parse_chapter_input` for the `1-5,8`
-syntax, and `scraper_store`'s five-digit chapter naming.
+It is the only stage that talks to the site, and it is small: one request for the chapter list,
+one request per chapter page, then the images.
 
 ```bash
-uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE -c 1-5
+uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE --dry-run
 uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE --all
+uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n TBATE -c 1-3,175.1-175.3
 ```
 
-   - `--slug`: series slug from the site URL; `-n` is only the local folder name.
-   - `-c`: chapter selection in **site** numbering, e.g. `1-5,8`.
-   - `--all`: walk the next-chapter links until the series ends.
-   - `--overwrite` / `--delay` / `--dry-run`: as for the novel scraper.
+   - `-n`: local folder under `comics/`. `--slug` is the series slug from the site URL and
+     defaults to `-n`; it exists because the folder name and the URL are not always the same.
+   - `-c`: **site labels**, e.g. `1-5,8` or `175.1-175.19`. This is not `summarize.py -c`,
+     which takes ordinals — see below. A range spans the chapters *between* its endpoints in
+     reading order, which is the only honest reading of `175.1-175.19`: `175.10` and `175.1` are
+     the same number but different labels, so counting in floats cannot name that set.
+   - `--ordinals`: positions in `chapters.json` instead of labels, e.g. `1-5,8`. Use this once
+     the manifest exists and you want "chapter 144 of the download" rather than "Chapter 144".
+   - `--from` / `--to`: a label range, inclusive, e.g. `--from 175.1 --to 176`.
+   - `--all`: every chapter in the list. Mutually exclusive with `-c` and `--ordinals`.
+   - `--overwrite`: re-fetch pages that already exist.
+   - `--dry-run`: print the resolved plan — count, first and last chapter, every ordinal — and
+     stop. It does **not** scan, which is the point: a scan is a request per chapter and answers
+     a question you did not ask.
+   - `--delay`: seconds before each page request (default `0.4`).
 
-Chapter numbering is the trap here. The site's reader **chapter N** is stored on its CDN as
-`chapter_<N-1>`, so chapter 1 is `chapter_0/c_0_1.jpg` and chapter 2 is `chapter_1/c_1_1.jpg`.
-Filenames deliberately keep the *storage* numbering, because that is what `comic_reader` groups on
-and what a manual save already produces — so a filename can look off by one and still be right.
+**The chapter list is one request.** A plain GET of the site's AJAX endpoint answers `0`; a POST
+carrying `X-Requested-With: XMLHttpRequest` returns all ~300 chapters at once. Earlier versions
+walked the next-chapter links and stopped when a chapter had no images — which is also what a
+Cloudflare interstitial looks like, so a blocked page could end a download early and report
+success. That walk is gone, and a challenge page now raises instead.
 
-The chapter list is loaded by JavaScript and its endpoint answers `0` to a plain request, so `--all`
-walks the page's own next/prev links instead and stops when a chapter carries no reader images.
-That is also why the challenge check matters: a Cloudflare page has no images either, and without
-distinguishing them the walk would end early and still report a clean finish. A non-200 chapter
-page aborts the run for the same reason. Verified byte-identical against a manual download of
-chapters 1 and 2, which is also how a page missing from that manual set (`c_1_38.jpg`) was found.
+**The manifest, and why ordinals are pinned.** `chapters.json` in the output folder records each
+chapter's `slug` (the site's identifier), `label`, and `ordinal` — its position in reading order.
+The ordinal is assigned once and kept forever. Re-scraping months later can therefore add a
+chapter without renumbering the ones already downloaded, which matters because the site inserts
+chapters retroactively (all of `175.1`–`175.19` arrived between `175` and `176`). Reading order is
+the site's list order, not the numeric order of the labels: `175.1` comes *before* `175` in the
+list.
 
-Only `comic-site.test` and its subdomains are fetched, over HTTP(S) only; the pages inject obfuscated
-scripts that redirect to ad hosts, so off-site image URLs are refused and no JavaScript is ever
-executed.
+**Filenames use the ordinal, not the site's number.** Pages are written as
+`c_<ordinal>_<page>.<ext>`, six digits on the ordinal and three on the page —
+`c_000012_003.jpg`. Zero-padding makes lexical order equal reading order, which is what lets
+`comic_reader.group_chapters` sort by name alone. It is deliberately *not* the CDN's
+`chapter_<N-1>` directory number: the site files chapter N under `chapter_<N-1>`, but a re-upload
+can publish the same number twice (`Chapter 144` and `Chapter 144.0` are two chapters, both 144.0),
+so the number cannot identify a chapter. The ordinal can.
+
+**Legacy trees must be archived first.** Pages written before ordinals existed look like
+`c_7_1.jpg` — an unpadded chapter number. They match the same reader pattern as the new names, so
+reading them side by side would merge two chapters' pages (chapter 7's old pages and its new ones
+would both claim `c_000007_*`). The download refuses to run over such a tree and prints the
+command; move the old tree into the gitignored `unused/2026-11-01-pre-ordinal/` by hand. Nothing
+is ever deleted automatically.
+
+**Duplicates are settled before anything is downloaded.** Before downloading, the run scans each
+selected chapter: one request for the chapter page (page count) and one for page 1 (a 16×16
+average hash). Chapters with the same page-1 hash are duplicates; within a group the chapter with
+**more pages wins** (the re-upload can lose a page — `144` has 81, `144.0` has 80) and the loser is
+marked `duplicate_of` and skipped. That is a request per chapter up front — roughly 600 for a
+300-chapter series — and it is deliberate: it is how the duplicate question is answered once, before
+any bytes are written, rather than after downloading both copies. The flags are **re-derived every
+run** from a fresh scan and saved back to `chapters.json`; a stale value in the file is never
+trusted, because the question is about the pages as they are now.
+
+**`-c` here and `-c` in `summarize.py` are different namespaces.** The download stage takes *site
+labels* (`-c 175.1`), because those are what you read on the site. `summarize.py` takes *ordinals*
+(`-c 5`), because by then the chapter is a local file. Pass the wrong one and you get a loud
+error naming the label it could not find; when the selection is a bare number it also suggests
+`--ordinals`. Note that `-c 144` and `-c 144.0` select **different chapters**.
+
+Only the host in `comic_config.json`'s `comic_site_host` and its subdomains are fetched, over
+HTTP(S) only; the pages inject obfuscated scripts that redirect to ad hosts, so off-site image URLs
+are refused and no JavaScript is ever executed. `comic_series_url` holds the series URL template,
+so the site's address lives in one place rather than in the code.
+
+The download exits non-zero if any chapter failed or ends with zero pages on disk, and the exit
+code reports what is *on disk*, not what this run fetched — so a fully resumed run is a success.
 
 #### Comics get their own slug
 

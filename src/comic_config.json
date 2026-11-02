@@ -1,6 +1,7 @@
 {
   "_comment": [
-    "Settings for src/comic_reader.py, the image -> text stage.",
+    "Settings for src/comic_reader.py, the image -> text stage, and",
+    "src/comic_scraper.py, the download stage.",
     "",
     "glossary: names and story terms the OCR segmenter must never split.",
     "Nothing in a page's text distinguishes 'sap in' from 'block him from', so a",
@@ -12,6 +13,14 @@
     "a bubble straddling a seam whole in at least one tile; duplicates across a",
     "seam are dropped when the transcript is assembled.",
     "",
+    "comic_series_url: the series page for a slug, with {slug} filled in from",
+    "--slug (or --name). The chapter list is read from <series>/ajax/chapters/,",
+    "so this is the one place the site's URL shape is written down.",
+    "",
+    "comic_site_host: the only host page images may come from, including its",
+    "subdomains. The pages inject scripts that redirect to ad hosts, so any",
+    "other image URL is refused rather than followed.",
+    "",
     "comics_dir / transcripts_dir / novels_dir resolve relative to the repo",
     "root (parent of src/), matching summarizer_config.json."
   ],
@@ -19,6 +28,9 @@
   "comics_dir": "comics",
   "transcripts_dir": "transcripts",
   "novels_dir": "novels",
+
+  "comic_series_url": "https://comic-site.test/manga/{slug}/",
+  "comic_site_host": "comic-site.test",
 
   "tile_height": 1200,
   "tile_overlap": 120,
