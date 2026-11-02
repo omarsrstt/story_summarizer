@@ -17,6 +17,10 @@ What it reuses from the novel scraper, and why each one matters:
   stage uses, so the comics directory cannot disagree between the two. Imported
   inside the function, not at module level: the reader pulls in the OCR extra's
   numpy/wordninja, and a download-only install must not need them to import this.
+  The same deferral covers ``comic_reader.page_filename`` and the page extension
+  list, used by the download stage below. Pages are named by that one rule, but
+  the import stays local, so this module remains importable on an install that
+  has only the ``scraper`` extra.
 
 Two things about this site were measured, not assumed:
 
@@ -39,12 +43,20 @@ URL is refused rather than followed, and no JavaScript is ever executed.
 from __future__ import annotations
 
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from scraper_fast import _with_retries, post_transport  # noqa: F401 - re-exported
+from comic_manifest import ChapterRecord
+from scraper_fast import (  # noqa: F401 - re-exported
+    _with_retries,
+    bytes_transport,
+    default_transport,
+    post_transport,
+)
 from scraper_parse import looks_like_challenge
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -171,6 +183,138 @@ def page_urls(html: str) -> list[str]:
         if url and safe_image_url(url):
             urls.append(url)
     return urls
+
+
+# -- downloading the pages --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChapterResult:
+    """What one chapter's download actually did.
+
+    ``saved`` and ``failed`` describe this run; ``on_disk`` is how many pages
+    the chapter has afterwards, so a resumed chapter reports what the reader
+    will see rather than what this run fetched. A chapter with ``saved == 0``
+    and ``failed == 0`` and ``on_disk == 0`` is a chapter with no images, which
+    is not the same as a success.
+    """
+
+    record: ChapterRecord
+    saved: int
+    failed: int
+    on_disk: int
+
+
+def pages_on_disk(out_dir: Path, ordinal: int) -> int:
+    """How many pages are already saved on disk for chapter ``ordinal``.
+
+    The match is on the zero-padded ordinal (``c_000005_``), never a bare
+    prefix: chapter 5 and chapter 50 both begin with ``c_0000``, so a prefix
+    match would count one chapter's pages into another's total and silently
+    merge them.
+    """
+
+    from comic_reader import PAGE_EXTENSIONS  # deferred: see module docstring
+
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return 0
+    prefix = f"c_{ordinal:06d}_"
+    return sum(
+        1
+        for path in out_dir.glob("c_*")
+        if path.name.startswith(prefix) and path.suffix.lower() in PAGE_EXTENSIONS
+    )
+
+
+def download_chapter(
+    series_url: str,
+    record: ChapterRecord,
+    out_dir: Path,
+    *,
+    overwrite: bool = False,
+    delay: float = 0.4,
+) -> ChapterResult:
+    """Save every page of one chapter into ``out_dir``, and count honestly.
+
+    A page is only counted as saved once its bytes are on disk and passed
+    ``looks_like_image``; anything else is counted as failed and named on
+    stdout. That is the whole point of the count: the previous version of this
+    script reported success while downloading nothing, so a chapter that saves
+    zero pages must not look like a chapter that went fine.
+
+    A chapter page that is a Cloudflare challenge raises instead of returning
+    zero pages: a challenge carries no images, and "no images" read as a
+    complete chapter is exactly how a download gets truncated silently.
+    """
+
+    from comic_reader import page_filename  # deferred: see module docstring
+    from comic_images import looks_like_image
+
+    out_dir = Path(out_dir)
+    url = chapter_url(series_url, record.slug)
+    status, body = default_transport(url, {}, {})
+    if status != 200:
+        raise ScrapeError(f"{record.label}: HTTP {status} at {url}")
+    if looks_like_challenge(body):
+        raise ScrapeError(
+            f"{record.label}: Cloudflare challenge instead of the chapter page "
+            f"at {url}. A challenge page has no images; refusing rather than "
+            "reporting a zero-page chapter."
+        )
+
+    urls = page_urls(body)
+    # The chapter lists this many pages, whatever happens to each of them
+    # below. Saved bytes are not the measure: a page that failed still exists on
+    # the site, and the scan pass uses this to notice a chapter that came up
+    # short.
+    record.pages = len(urls)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    failed = 0
+    for index, image_url in enumerate(urls, start=1):
+        try:
+            ext = image_ext(image_url)
+        except ScrapeError as exc:
+            failed += 1
+            print(f"  page {index}: failed: {exc}")
+            continue
+
+        name = page_filename(record.ordinal, index, ext)
+        path = out_dir / name
+        if path.exists() and not overwrite:
+            continue
+
+        if delay:
+            time.sleep(delay)
+
+        status, payload = bytes_transport(image_url, {"Referer": series_url}, {})
+        if status != 200:
+            failed += 1
+            print(f"  {name}: failed: HTTP {status}")
+            continue
+        if not looks_like_image(payload):
+            failed += 1
+            print(
+                f"  {name}: failed: not an image "
+                f"({len(payload)} bytes, likely an error page)"
+            )
+            continue
+
+        # Written under its final name only after the bytes are known to be an
+        # image, so a half-finished run never leaves a file that looks like a
+        # page but cannot be read.
+        path.write_bytes(payload)
+        saved += 1
+        print(f"  {name}: saved")
+
+    on_disk = pages_on_disk(out_dir, record.ordinal)
+    print(
+        f"{record.label}: {saved} saved, {failed} failed, {on_disk} on disk "
+        f"of {record.pages} listed"
+    )
+    return ChapterResult(record=record, saved=saved, failed=failed, on_disk=on_disk)
 
 
 # -- network ---------------------------------------------------------------

@@ -86,6 +86,29 @@ def _raw_post_transport(url: str, headers: dict, cookies: dict) -> tuple[int, st
         return 0, ""
 
 
+def _raw_bytes_transport(url: str, headers: dict, cookies: dict) -> tuple[int, bytes]:
+    """Single curl_cffi GET returning the undecoded body; status 0 on error.
+
+    ``_raw_transport`` goes through ``resp.text``, which decodes the body as
+    text: fine for HTML, fatal for an image, whose bytes are not text at all.
+    Images must be kept as bytes from the response to the file on disk.
+    """
+
+    from curl_cffi import requests as cffi
+
+    try:
+        resp = cffi.get(
+            url,
+            impersonate="chrome",
+            headers=headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        return resp.status_code, resp.content
+    except Exception:  # noqa: BLE001 - timeouts raise here; surfaced as status 0
+        return 0, b""
+
+
 def _with_retries(fetch: Callable[[], tuple[int, object]]) -> tuple[int, object]:
     """Run ``fetch`` under the shared retry policy and return its last result.
 
@@ -125,6 +148,18 @@ def default_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]
     """
 
     return _with_retries(lambda: _raw_transport(url, headers, cookies))
+
+
+def bytes_transport(url: str, headers: dict, cookies: dict) -> tuple[int, bytes]:
+    """GET ``url`` as raw bytes, under the same retry policy as a text GET.
+
+    Separate from :func:`default_transport` only in what it returns: that one
+    hands back ``resp.text``, which decodes an image's bytes as if they were
+    text and leaves a file that is not the picture. Same TLS impersonation and
+    same retries, because a retry policy per content type is still two policies.
+    """
+
+    return _with_retries(lambda: _raw_bytes_transport(url, headers, cookies))
 
 
 def post_transport(url: str, headers: dict, cookies: dict) -> tuple[int, str]:

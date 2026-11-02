@@ -1,6 +1,7 @@
 import pytest
 
 import comic_scraper as cs
+from comic_manifest import ChapterRecord
 
 SERIES = "https://comic-site.test/manga/the-beginning-after-the-end-series/"
 
@@ -183,3 +184,89 @@ def test_extensions_are_normalised(url, ext):
 def test_an_unknown_or_missing_extension_is_refused(url):
     with pytest.raises(cs.ScrapeError):
         cs.image_ext(url)
+
+
+# -- downloading one chapter -----------------------------------------------
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 400
+
+
+def _page_html(*urls):
+    return "".join(
+        f'<img class="wp-manga-chapter-img" data-src="{u}">' for u in urls
+    )
+
+
+def test_pages_are_saved_under_the_ordinal(tmp_path, monkeypatch):
+    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, JPEG))
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
+
+    assert [p.name for p in tmp_path.glob("*.jpg")] == ["c_000005_001.jpg"]
+    assert (result.saved, result.failed, result.on_disk) == (1, 0, 1)
+
+
+def test_a_page_that_saves_nothing_is_reported_as_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        cs, "default_transport", lambda u, h, c: (200, _page_html("https://c4.comic-site.test/x/a.jpg"))
+    )
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (404, b""))
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
+
+    assert (result.saved, result.failed, result.on_disk) == (0, 1, 0)
+    assert list(tmp_path.glob("*.jpg")) == []
+
+
+def test_an_html_error_page_is_never_saved_as_an_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        cs, "default_transport", lambda u, h, c: (200, _page_html("https://c4.comic-site.test/x/a.jpg"))
+    )
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, b"<html>error</html>"))
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
+
+    assert result.saved == 0 and result.failed == 1
+    assert list(tmp_path.glob("*.jpg")) == []
+
+
+def test_existing_pages_are_not_downloaded_again(tmp_path, monkeypatch):
+    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+    seen = []
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (seen.append(u), (200, JPEG))[1])
+    (tmp_path / "c_000005_001.jpg").write_bytes(JPEG)
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
+
+    assert seen == []
+    assert (result.saved, result.failed, result.on_disk) == (0, 0, 1)
+
+
+def test_overwrite_refetches_what_is_already_there(tmp_path, monkeypatch):
+    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+    seen = []
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (seen.append(u), (200, JPEG))[1])
+    (tmp_path / "c_000005_001.jpg").write_bytes(b"old")
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, overwrite=True, delay=0)
+
+    assert seen == [page]
+    assert result.saved == 1
+
+
+def test_a_chapter_with_no_images_is_zero_pages_not_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, "<html></html>"))
+    record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
+
+    result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
+
+    assert (result.saved, result.failed, result.on_disk) == (0, 0, 0)
