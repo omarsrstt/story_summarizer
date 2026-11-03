@@ -82,14 +82,23 @@ def test_a_fingerprint_is_three_page_hashes_concatenated():
 
 def test_a_fingerprint_skips_page_one_so_a_shared_opener_cannot_match():
     # The live bug: 175.1 and 175.2 share a byte-identical opener page and are
-    # otherwise different chapters. Hashing page 1 made them identical.
-    one = chapter_fingerprint([PAGE_A, PAGE_B, PAGE_C, PAGE_A])
-    two = chapter_fingerprint([PAGE_A, PAGE_C, PAGE_A, PAGE_B])
+    # otherwise different chapters. Hashing page 1 made them identical, because
+    # both page-1 hashes are the same 64 characters, so the pair read as
+    # distance 0.
+    first = [PAGE_A, PAGE_B, PAGE_C, PAGE_A]
+    second = [PAGE_A, PAGE_C, PAGE_A, PAGE_B]
+
+    one = chapter_fingerprint(first)
+    two = chapter_fingerprint(second)
 
     assert len(one) == len(two) == 192
     assert hamming(one, two) > 0
-    # And the page-1 hash alone really would have said "same chapter".
-    assert average_hash(PAGE_A) == average_hash(PAGE_A)
+
+    # And the opener really is shared: hashing just page 1 gives the two
+    # chapters the same value, which is what the old fingerprint compared.
+    opener_of_first = chapter_fingerprint(first[:1], skip=0, take=1)
+    opener_of_second = chapter_fingerprint(second[:1], skip=0, take=1)
+    assert opener_of_first == opener_of_second == average_hash(PAGE_A)
 
 
 def test_a_fingerprint_of_a_chapter_with_fewer_pages_is_shorter():

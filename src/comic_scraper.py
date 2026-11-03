@@ -724,20 +724,22 @@ def open_session():
 def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
     """Fill in ``record.pages`` and ``record.content_hash`` without saving a page.
 
-    One GET for the chapter page, then the first four page images: the count of
-    listed pages, plus a fingerprint of pages 2-4. That is the minimum needed to
-    decide whether two chapters are the same before any bytes are written -- the
-    whole point is that a duplicate costs five requests, not eighty.
+    One GET for the chapter page, then pages 2-4: the count of listed pages, plus
+    a fingerprint of the next three. That is the minimum needed to decide whether
+    two chapters are the same before any bytes are written -- the whole point is
+    that a duplicate costs four requests, not eighty.
 
-    Page 1 is fetched only so it can be **skipped**; the fingerprint starts at
-    page 2. See ``comic_images.chapter_fingerprint`` for the measurement: true
-    duplicates were 88 bits apart on page 1 while two distinct chapters sharing
-    a cover were 0 bits apart there. Pages 2-4 separate them 0-vs-337/768.
+    Page 1 is **never fetched**. The window is ``urls[1:4]``, so the "start at
+    page 2" rule is the slice itself and there is no page-1 slot to skip at the
+    fetch site. See ``comic_images.chapter_fingerprint`` for the measurement: the
+    duplicate pair ``144``/``144.0`` was 88 bits apart on page 1, while the
+    distinct pair ``175.1``/``175.2`` was 0 bits apart there because they share a
+    cover. Pages 2-4 separate them 0-vs-337/768.
 
-    Cost, so nobody "optimises" this back to one image: a scan is up to 5
+    Cost, so nobody "optimises" this back to one image: a scan is up to 4
     requests per chapter instead of 2. That is the price of not downloading a
     whole chapter twice, and of not silently dropping a real chapter that shares
-    an opener with its neighbour -- 3x more scan requests is cheap against
+    an opener with its neighbour -- twice the scan requests is cheap against
     either. Deciding duplicates is the only reason this stage exists.
 
     Nothing is written to disk. The fingerprint is the empty string when no page
@@ -766,16 +768,18 @@ def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
     urls = page_urls(body)
     record.pages = len(urls)
 
-    # Pages 1-4: page 1 is skipped by the fingerprint, pages 2-4 are hashed.
+    # Pages 2-4 only: the slice is where "do not hash page 1" lives, so page 1
+    # is never requested at all and ``chapter_fingerprint`` is called with
+    # ``skip=0``. Hashing page 1 was measured to be wrong in both directions (see
+    # the docstring), so it buys nothing to fetch it just to discard it.
+    #
     # A page that cannot be fetched keeps its **position** as ``b""`` instead of
-    # being dropped from the list: dropping it would shift every later page up
-    # one slot, so a chapter whose page 1 failed would hash pages 3-4 where its
-    # duplicate hashed pages 2-3 -- two fingerprints of different lengths that
-    # can never compare. ``chapter_fingerprint`` skips an undecodable payload,
-    # so an unfetchable page reads as "no evidence here" rather than as a
-    # different chapter.
+    # being dropped from the list, so the pages after it stay in their places:
+    # ``chapter_fingerprint`` skips an undecodable payload and concatenates the
+    # survivors in order, which makes an unfetchable page read as "no evidence
+    # here" rather than as a shifted, different chapter.
     payloads: list[bytes] = []
-    for image_url in urls[:4]:
+    for image_url in urls[1:4]:
         try:
             page_status, payload = bytes_transport(
                 image_url, {"Referer": series_url}, {}
@@ -793,7 +797,7 @@ def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
             continue
         payloads.append(payload)
 
-    record.content_hash = chapter_fingerprint(payloads)
+    record.content_hash = chapter_fingerprint(payloads, skip=0)
 
     print(
         f"{record.label}: scanned {record.pages} pages, "
@@ -836,9 +840,18 @@ def _is_duplicate(a: str, b: str) -> bool:
     duplicate silently drops a real chapter, a missed duplicate only wastes
     bandwidth. Being wrong in the cheap direction is the whole rule.
 
-    This is also what makes an old manifest safe: it holds 64-character page-1
-    hashes from before this change, and they simply stop matching anything until
-    the chapter is rescanned. See ``mark_duplicates``.
+    This is also what makes an old manifest safe **today**, but only because of
+    the scan, not because of this length check. An old manifest holds
+    64-character page-1 hashes from before this change. A 64-character value
+    passes the length guard against any other 64-character value -- another
+    legacy hash, or a current one-page fingerprint from a 2-page chapter
+    (``len // 64`` = 1) -- so a legacy hash can still be compared, and two
+    distinct chapters sharing a cover could be grouped on the strength of it,
+    which is the very bug this module was changed to fix. That route is closed
+    by ``execute``: it rescans every chapter in the plan and clears the hash of
+    any record whose scan failed, so no stale value reaches here. If that
+    rescan-and-clear step were ever removed, the leftover risk is a legacy
+    64-character hash being compared against another 64-character value.
     """
 
     from comic_images import hamming
@@ -1300,7 +1313,7 @@ def parse_args(argv: list[str] | None = None):
             "ordinal pinned in chapters.json."
         ),
         epilog=(
-            "A run scans one chapter page and up to four images per chapter "
+            "A run scans one chapter page and up to three images per chapter "
             "before downloading anything, so duplicate re-uploads are settled "
             "before bytes are written. --dry-run skips that scan."
         ),
@@ -1384,7 +1397,7 @@ def execute(setup: Setup, args) -> int:
     if has_legacy_files(setup.out_dir):
         # Checked before the scan, not after. ``prepare`` has already spent the
         # one chapter-list POST to build the plan, but the scan is the expensive
-        # half -- up to five requests per chapter, ~1500 for a full series -- and
+        # half -- up to four requests per chapter, ~1200 for a full series -- and
         # it would be spent reaching a refusal this check can make from what is
         # already on disk.
         print(archive_hint(setup.out_dir))
@@ -1397,7 +1410,7 @@ def execute(setup: Setup, args) -> int:
 
     print(
         f"scanning {len(setup.plan)} chapter(s) for duplicates: the chapter page "
-        f"and the first four images of each are fetched first, so no page is "
+        f"and up to three images of each are fetched first, so no page is "
         f"downloaded twice"
     )
     scanned: list[ChapterRecord] = []
@@ -1444,7 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             # Deliberately no scan: --dry-run answers "what would you download?",
             # and a scan answers "which are duplicates?" -- a question the user
-            # did not ask, costing five requests per chapter on a 300-chapter
+            # did not ask, costing four requests per chapter on a 300-chapter
             # series.
             print("dry run: nothing scanned, nothing written")
             return 0

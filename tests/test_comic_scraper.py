@@ -521,6 +521,34 @@ def test_fingerprints_of_different_lengths_are_never_duplicates():
     assert one_page.duplicate_of is None
 
 
+def test_a_legacy_sixty_four_char_hash_only_compares_at_sixty_four_chars():
+    # Records the limitation rather than pretending it does not exist: a hash
+    # written by the old page-1 code is 64 characters, and the length guard in
+    # ``_is_duplicate`` is a length test, not a format test. So a legacy value
+    # is never compared against a current 192-character fingerprint -- but it IS
+    # compared against any other 64-character value, whether that is another
+    # legacy hash or a current one-page fingerprint from a 2-page chapter
+    # (``len // 64`` = 1). Two distinct chapters that share a cover could
+    # therefore still group if both carried a legacy hash.
+    #
+    # This is pinned deliberately, and the route is closed at the caller instead
+    # of here: ``execute`` rescans every chapter in the plan and clears the hash
+    # of any record whose scan failed, so no stale value reaches
+    # ``mark_duplicates``. Removing that rescan-and-clear would re-open it, and
+    # this test says so out loud rather than letting the comment claim a
+    # protection the code does not provide.
+    legacy = FINGERPRINT[:64]
+    other_legacy = _flipped(legacy, 4)
+    current = FINGERPRINT
+
+    # Different lengths never compare, legacy or not.
+    assert not cs._is_duplicate(legacy, current)
+
+    # Two 64-character values within the one-page threshold of 10 bits DO
+    # compare, which is exactly the latent risk described above.
+    assert cs._is_duplicate(legacy, other_legacy)
+
+
 def test_a_page_count_tie_is_won_by_the_lower_ordinal_whatever_the_list_order():
     first = ChapterRecord(ordinal=1, slug="a", label="Chapter 144", number=144.0, pages=80)
     second = ChapterRecord(ordinal=2, slug="b", label="Chapter 144.0", number=144.0, pages=80)
@@ -588,8 +616,11 @@ def test_a_scan_fingerprints_pages_two_to_four(monkeypatch):
     assert average_hash(PAGE_IMAGE) not in scanned.content_hash
 
 
-def test_a_scan_fetches_no_more_than_page_one_plus_the_fingerprint_pages(monkeypatch):
-    # Five pages listed: 1 to skip and 3 to hash is four images, not five.
+def test_a_scan_fetches_only_the_fingerprint_pages(monkeypatch):
+    # Five pages listed, and only pages 2-4 are fetched: three images, because
+    # page 1 is not evidence of anything and is never requested. That is one
+    # request per chapter fewer than fetching it just to skip it -- ~300 saved on
+    # a full series, against a site that bot-checks.
     names = [f"ch_9_{index}.jpg" for index in range(1, 6)]
     html = _page_html(*(f"https://c4.comic-site.test/x/chapter_9/{name}" for name in names))
     fetched = []
@@ -601,7 +632,8 @@ def test_a_scan_fetches_no_more_than_page_one_plus_the_fingerprint_pages(monkeyp
 
     cs.scan_chapter(SERIES, record)
 
-    assert fetched == names[:4]
+    assert fetched == names[1:4]
+    assert names[0] not in fetched
     assert len(record.content_hash) == 192
 
 
@@ -616,58 +648,73 @@ def test_a_scan_writes_no_pages(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_scan_that_cannot_fetch_any_page_leaves_the_fingerprint_empty(monkeypatch):
-    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
-    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+def test_a_scan_that_cannot_fetch_any_fingerprint_page_leaves_it_empty(monkeypatch):
+    # Two pages, so page 2 is inside the window and is the only page that could
+    # contribute a hash. It 404s, so there is no evidence at all.
+    html = _page_html(
+        "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg",
+        "https://c4.comic-site.test/x/chapter_9/ch_9_2.jpg",
+    )
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (404, b""))
     record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
 
     scanned = cs.scan_chapter(SERIES, record)
 
-    assert scanned.pages == 1
+    assert scanned.pages == 2
     assert scanned.content_hash == ""
 
 
 def test_a_truncated_page_is_unhashable_not_a_crash(monkeypatch):
     # JPEG carries the magic bytes but is not a decodable picture, which is what
     # a response cut off mid-transfer looks like. It must read as "could not
-    # hash", not abort the scan of the whole series.
-    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
-    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+    # hash", not abort the scan of the whole series. Two pages, so the truncated
+    # one is the fingerprint page -- page 1 is not fetched at all.
+    html = _page_html(
+        "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg",
+        "https://c4.comic-site.test/x/chapter_9/ch_9_2.jpg",
+    )
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, JPEG))
     record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
 
     scanned = cs.scan_chapter(SERIES, record)
 
-    assert scanned.pages == 1
+    assert scanned.pages == 2
     assert scanned.content_hash == ""
 
 
-def test_one_unfetchable_fingerprint_page_does_not_shift_the_rest(monkeypatch):
-    # Page 3 fails. If the failure were dropped from the list instead of keeping
-    # its slot, page 4 would move up into page 3's position and this chapter's
-    # fingerprint would disagree with every scan that saw all four pages -- two
-    # fingerprints of different lengths, which never compare.
-    pages = {
-        "ch_9_1.jpg": PAGE_IMAGE,
-        "ch_9_2.jpg": PAGE_B,
-        "ch_9_4.jpg": PAGE_D,
-    }
-    html = _page_html(
-        *(f"https://c4.comic-site.test/x/chapter_9/ch_9_{index}.jpg" for index in range(1, 5))
-    )
+def test_a_failed_fetch_costs_its_slot_and_never_refills_the_window(monkeypatch):
+    # Page 2 -- the first page of the fingerprint window -- fails to fetch. The
+    # window must stay pages 2-4: no later page may be pulled in to stand in for
+    # the one that failed, because the scan would then describe pages 3-5 and
+    # never match a clean scan of the same artwork. The assertion on ``fetched``
+    # is the one with teeth here -- a drop-without-refill implementation happens
+    # to produce the same string, because an undecodable payload is skipped
+    # anyway (see ``comic_images.chapter_fingerprint``); what must not happen is
+    # the window sliding forward.
+    names = [f"ch_9_{index}.jpg" for index in range(1, 6)]
+    html = _page_html(*(f"https://c4.comic-site.test/x/chapter_9/{name}" for name in names))
+    served = {names[2]: PAGE_C, names[3]: PAGE_D, names[4]: PAGE_B}
+    fetched = []
+
+    def image(url, headers, cookies):
+        name = url.rsplit("/", 1)[-1]
+        fetched.append(name)
+        if name == names[1]:
+            raise RuntimeError("connection reset")
+        return 200, served[name]
+
     monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
-    monkeypatch.setattr(
-        cs, "bytes_transport",
-        lambda u, h, c: (200, pages[u.rsplit("/", 1)[-1]])
-        if u.rsplit("/", 1)[-1] in pages
-        else (500, b""),
-    )
+    monkeypatch.setattr(cs, "bytes_transport", image)
     record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
 
     scanned = cs.scan_chapter(SERIES, record)
 
-    assert scanned.content_hash == average_hash(PAGE_B) + average_hash(PAGE_D)
+    # Exactly the window: page 1 was never requested, and page 5 was not pulled
+    # in to replace the page that failed.
+    assert fetched == names[1:4]
+    assert scanned.content_hash == average_hash(PAGE_C) + average_hash(PAGE_D)
 
 
 def test_a_legacy_page_file_blocks_the_run(tmp_path, capsys):

@@ -5,11 +5,11 @@ real pages, those two are **0 bits apart out of 768** once pages 2-4 are
 compared, while two distinct chapters that share an opener page (``175.1`` and
 ``175.2``) are **337 bits apart**.
 
-Page 1 is not that signal, in either direction: the two *duplicate* chapters
-were measured 88 bits apart on page 1, and the two *distinct* ones were 0 bits
-apart there because they share a cover. Hashing page 1 therefore missed real
-duplicates and invented false ones -- which is what ``chapter_fingerprint``
-fixes by starting at page 2.
+Page 1 is not that signal, in either direction: the duplicate pair
+``144``/``144.0`` was measured 88 bits apart on page 1, and the distinct pair
+``175.1``/``175.2`` was 0 bits apart there because they share a cover. Hashing
+page 1 therefore missed real duplicates and invented false ones -- which is what
+``chapter_fingerprint`` fixes by starting at page 2.
 
 This module is the reusable half of that: it knows nothing about scraping,
 chapters or the manifest. It takes bytes and returns a string.
@@ -117,6 +117,16 @@ def chapter_fingerprint(pages: list[bytes], *, skip: int = 1, take: int = 3) -> 
     cost the whole fingerprint. ``""`` means no page was hashable at all, which
     callers treat as "not a candidate" rather than as a value two chapters can
     share.
+
+    Note the asymmetry with ``skip`` and ``take``, which is deliberate: a page
+    that fails to *fetch* arrives as ``b""`` and keeps its slot in ``pages``
+    (the caller appends the placeholder), but a page that fails to *decode* is
+    dropped here entirely. So a chapter whose page 2 will not decode yields the
+    hashes of pages 3 and 4 -- 128 characters, not the 192 a clean scan gives --
+    and a shorter fingerprint never compares with a longer one. That direction is
+    the safe one: the cost is a missed duplicate (bandwidth), never a false one
+    (a real chapter silently dropped). Keeping the slot instead would make the
+    two scans comparable, at the risk of comparing a hole against a picture.
     """
 
     hashes: list[str] = []
