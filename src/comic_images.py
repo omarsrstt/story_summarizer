@@ -1,8 +1,15 @@
-"""Fingerprint a comic page image, so a re-uploaded chapter can be recognised.
+"""Fingerprint a comic chapter, so a re-uploaded chapter can be recognised.
 
 The site re-lists ``144`` and ``144.0`` as separate chapters. Measured on the
-real pages, the two pairs differ by **0 bits out of 256** on pages 2-10, so an
-average hash with a small distance threshold identifies them reliably.
+real pages, those two are **0 bits apart out of 768** once pages 2-4 are
+compared, while two distinct chapters that share an opener page (``175.1`` and
+``175.2``) are **337 bits apart**.
+
+Page 1 is not that signal, in either direction: the two *duplicate* chapters
+were measured 88 bits apart on page 1, and the two *distinct* ones were 0 bits
+apart there because they share a cover. Hashing page 1 therefore missed real
+duplicates and invented false ones -- which is what ``chapter_fingerprint``
+fixes by starting at page 2.
 
 This module is the reusable half of that: it knows nothing about scraping,
 chapters or the manifest. It takes bytes and returns a string.
@@ -81,3 +88,42 @@ def hamming(a: str, b: str) -> int:
     """
 
     return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+
+def chapter_fingerprint(pages: list[bytes], *, skip: int = 1, take: int = 3) -> str:
+    """One chapter's fingerprint: up to ``take`` page hashes concatenated.
+
+    ``skip`` defaults to 1 because **page 1 is not evidence of a duplicate**,
+    in either direction:
+
+    * Two chapters that really are the same chapter were measured **88 bits
+      apart on page 1** (``144``/``144.0``) -- the re-upload starts at a
+      different opener, so hashing page 1 missed the duplicate entirely.
+    * Two chapters that are genuinely different were measured **0 bits apart on
+      page 1** (``175.1``/``175.2``) because they share a cover -- so hashing
+      page 1 marked one as a duplicate of the other and dropped a real,
+      four-page chapter.
+
+    Pages 2 onwards separate them completely: 0/768 bits for the duplicate
+    pairs, 337/768 for the distinct pair. That is the discriminating signal.
+
+    Each hash is 64 hex characters, so the default ``take=3`` yields 192 hex
+    characters = 768 bits. A caller comparing two fingerprints must compare
+    whole fingerprints of the same length -- see ``comic_scraper`` for the
+    threshold, which scales with that length.
+
+    A page that will not decode is skipped rather than raised on: a response
+    cut off mid-transfer is routine at this stage, and one bad page must not
+    cost the whole fingerprint. ``""`` means no page was hashable at all, which
+    callers treat as "not a candidate" rather than as a value two chapters can
+    share.
+    """
+
+    hashes: list[str] = []
+    for payload in pages[skip:skip + take]:
+        try:
+            hashes.append(average_hash(payload))
+        except ValueError:
+            # Truncated or otherwise undecodable: skip this page, keep the rest.
+            continue
+    return "".join(hashes)

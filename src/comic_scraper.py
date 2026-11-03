@@ -724,13 +724,24 @@ def open_session():
 def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
     """Fill in ``record.pages`` and ``record.content_hash`` without saving a page.
 
-    One GET for the chapter page and one for page 1: the count of listed pages,
-    plus a fingerprint of the first one. That is the minimum needed to decide
-    whether two chapters are the same before any bytes are written -- the whole
-    point is that a duplicate costs one request, not eighty.
+    One GET for the chapter page, then the first four page images: the count of
+    listed pages, plus a fingerprint of pages 2-4. That is the minimum needed to
+    decide whether two chapters are the same before any bytes are written -- the
+    whole point is that a duplicate costs five requests, not eighty.
 
-    Nothing is written to disk. The hash is the empty string when page 1 cannot
-    be fetched, is not an image, or is an image that will not decode, which
+    Page 1 is fetched only so it can be **skipped**; the fingerprint starts at
+    page 2. See ``comic_images.chapter_fingerprint`` for the measurement: true
+    duplicates were 88 bits apart on page 1 while two distinct chapters sharing
+    a cover were 0 bits apart there. Pages 2-4 separate them 0-vs-337/768.
+
+    Cost, so nobody "optimises" this back to one image: a scan is up to 5
+    requests per chapter instead of 2. That is the price of not downloading a
+    whole chapter twice, and of not silently dropping a real chapter that shares
+    an opener with its neighbour -- 3x more scan requests is cheap against
+    either. Deciding duplicates is the only reason this stage exists.
+
+    Nothing is written to disk. The fingerprint is the empty string when no page
+    could be fetched, was not an image, or will not decode, which
     ``mark_duplicates`` treats as "not a candidate" rather than as a value two
     chapters can share.
 
@@ -739,7 +750,7 @@ def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
     as a zero-page chapter would hide the fact that nothing was scanned.
     """
 
-    from comic_images import average_hash, looks_like_image
+    from comic_images import chapter_fingerprint, looks_like_image
 
     url = chapter_url(series_url, record.slug)
     status, body = default_transport(url, {}, {})
@@ -754,61 +765,151 @@ def scan_chapter(series_url: str, record: ChapterRecord) -> ChapterRecord:
 
     urls = page_urls(body)
     record.pages = len(urls)
-    # Only page 1 is fetched. Pages 2-10 of the real duplicate pairs measured
-    # 0 bits apart on the average hash, so one page settles it; hashing all of
-    # them would cost a chapter's bandwidth to answer the same question.
-    record.content_hash = ""
-    if urls:
-        status, payload = bytes_transport(urls[0], {"Referer": series_url}, {})
-        if status == 200 and looks_like_image(payload):
-            try:
-                record.content_hash = average_hash(payload)
-            except ValueError:
-                # Magic bytes but no decodable picture: a response cut off
-                # mid-transfer still starts like a JPEG. ``looks_like_image``
-                # is a prefix test and cannot see that, but ``average_hash``
-                # decodes and does. One truncated page must not abort a scan of
-                # the whole series, so it reads as unhashable instead.
-                print(f"{record.label}: page 1 has image magic bytes but is not decodable")
+
+    # Pages 1-4: page 1 is skipped by the fingerprint, pages 2-4 are hashed.
+    # A page that cannot be fetched keeps its **position** as ``b""`` instead of
+    # being dropped from the list: dropping it would shift every later page up
+    # one slot, so a chapter whose page 1 failed would hash pages 3-4 where its
+    # duplicate hashed pages 2-3 -- two fingerprints of different lengths that
+    # can never compare. ``chapter_fingerprint`` skips an undecodable payload,
+    # so an unfetchable page reads as "no evidence here" rather than as a
+    # different chapter.
+    payloads: list[bytes] = []
+    for image_url in urls[:4]:
+        try:
+            page_status, payload = bytes_transport(
+                image_url, {"Referer": series_url}, {}
+            )
+        except Exception as exc:
+            # A transport failure on one page must not abort a scan of the whole
+            # series; it costs this slot's hash, not the chapter's fingerprint.
+            print(f"{record.label}: page fetch failed: {exc}")
+            payloads.append(b"")
+            continue
+        if page_status != 200 or not looks_like_image(payload):
+            # Magic-byte test only, so a response cut off mid-transfer still
+            # gets through here. ``chapter_fingerprint`` decodes and drops it.
+            payloads.append(b"")
+            continue
+        payloads.append(payload)
+
+    record.content_hash = chapter_fingerprint(payloads)
 
     print(
         f"{record.label}: scanned {record.pages} pages, "
-        f"hash {'none' if not record.content_hash else record.content_hash[:12]}"
+        f"fingerprint {'none' if not record.content_hash else record.content_hash[:12]}"
     )
     return record
+
+
+def _duplicate_threshold(fingerprint: str) -> int:
+    """The hamming distance two fingerprints may differ by and still match.
+
+    Scaled by the number of page hashes in the fingerprint rather than fixed:
+    each 64-hex page hash carries ``DUPLICATE_DISTANCE`` bits of slack for a
+    re-encode, so three hashed pages allow ``3 * DUPLICATE_DISTANCE`` = 30 bits
+    out of 768. That sits far below the 337/768 measured for two distinct
+    chapters sharing an opener, so the separation is not close.
+
+    A fixed 10 on the full 768-bit string was the alternative and is
+    needlessly strict: it would only catch chapters whose pages are almost
+    bit-identical, failing the whole point of tolerating a re-encode.
+    """
+
+    from comic_images import DUPLICATE_DISTANCE
+
+    return DUPLICATE_DISTANCE * (len(fingerprint) // 64)
+
+
+def _is_duplicate(a: str, b: str) -> bool:
+    """Whether two chapter fingerprints describe the same chapter.
+
+    Never compares an empty fingerprint: an unhashable chapter has no evidence
+    about it, and treating ``""`` as a value would make every unhashable chapter
+    a duplicate of the first one -- on a series where a scan failure is routine,
+    that is most of the series.
+
+    Different lengths are **not** duplicates. A one-page fingerprint and a
+    three-page one have no meaningful distance, and the two ways to get here are
+    otherwise both bad: comparing a common prefix makes one long and one short
+    chapter look alike, and the asymmetry of being wrong is real -- a false
+    duplicate silently drops a real chapter, a missed duplicate only wastes
+    bandwidth. Being wrong in the cheap direction is the whole rule.
+
+    This is also what makes an old manifest safe: it holds 64-character page-1
+    hashes from before this change, and they simply stop matching anything until
+    the chapter is rescanned. See ``mark_duplicates``.
+    """
+
+    from comic_images import hamming
+
+    if not a or not b or len(a) != len(b):
+        return False
+    return hamming(a, b) <= _duplicate_threshold(a)
 
 
 def mark_duplicates(records: list[ChapterRecord]) -> None:
     """Mark every chapter that duplicates another, keeping one from each group.
 
-    Chapters are grouped by ``content_hash`` and, within a group, the record with
-    the most pages survives; ties go to the one earliest in reading order. Every
-    other member gets ``duplicate_of`` set to the survivor's ordinal, which is
-    what lets ``run`` skip it before fetching anything.
+    Two records are duplicates when their fingerprints are within a hamming
+    threshold (``_duplicate_threshold``), not merely when the strings are equal.
+    Exact equality was wrong for a 768-bit fingerprint: it gave up the
+    tolerance an average hash exists to provide, so a single re-encoded page
+    turned a real duplicate into a second download.
 
-    An empty hash is never grouped. A chapter whose page 1 could not be fetched
-    has no fingerprint, and treating ``""`` as a value would make every
-    unhashable chapter a duplicate of the first one -- which, on a series where a
-    scan failure is routine, is most of the series.
+    Groups are still resolved by the survivor rule: within a group the record
+    with the most pages survives, and ties go to the lower ordinal, i.e. the
+    chapter earliest in reading order. Every other member gets ``duplicate_of``
+    set to the survivor's ordinal, which is what lets ``run`` skip it before
+    fetching anything.
+
+    Empty and differently-lengthed fingerprints never match; ``_is_duplicate``
+    holds that rule and explains why it errs towards "not a duplicate".
 
     Re-running this on an already-marked list is safe and is the intended use:
     every flag is cleared as it is recomputed, so the answer is always the
-    current hashes' and never a mixture of this scan's and the last one's.
+    current fingerprints' and never a mixture of this scan's and the last one's.
+
+    O(n²) over the plan -- 300 chapters is ~45k comparisons of short strings,
+    trivially fast. An index would have to bucket by distance, which a hamming
+    threshold does not allow without false negatives, so the plain loop is both
+    simpler and exact.
 
     Mutates ``records`` in place; returns nothing so there is no second copy of
     the answer to disagree with it.
     """
 
-    groups: dict[str, list[ChapterRecord]] = {}
+    # A re-scan decides the whole question again, so a flag left from the
+    # previous run is cleared first: a chapter that stops hashing (its pages
+    # failed this time) would otherwise stay marked as a duplicate of a chapter
+    # that is no longer known to be the same one.
     for record in records:
-        # A re-scan decides the whole question again, so a flag left from the
-        # previous run is cleared first: a chapter that stops hashing (its page 1
-        # failed this time) would otherwise stay marked as a duplicate of a
-        # chapter that is no longer known to be the same one.
         record.duplicate_of = None
-        if not record.content_hash:
-            continue
-        groups.setdefault(record.content_hash, []).append(record)
+
+    candidates = [record for record in records if record.content_hash]
+
+    # Union-find over the pairs, so the grouping is exactly "the connected
+    # components of the duplicate relation". Chaining is intentional: if A
+    # matches B and B matches C, all three are the same chapter, and one
+    # survivor for the set is what stops C being downloaded alongside A.
+    parent = list(range(len(candidates)))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for i in range(len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            if _is_duplicate(candidates[i].content_hash, candidates[j].content_hash):
+                first, second = root(i), root(j)
+                if first != second:
+                    parent[second] = first
+
+    groups: dict[int, list[ChapterRecord]] = {}
+    for index, record in enumerate(candidates):
+        groups.setdefault(root(index), []).append(record)
 
     for group in groups.values():
         if len(group) < 2:
@@ -818,9 +919,9 @@ def mark_duplicates(records: list[ChapterRecord]) -> None:
         # winner independent of the order the caller passed the records in --
         # `max` alone would hand a tie to whichever came first *in the list*.
         winner = max(group, key=lambda r: (r.pages, -r.ordinal))
-        for record in group:
-            if record is not winner:
-                record.duplicate_of = winner.ordinal
+        for member in group:
+            if member is not winner:
+                member.duplicate_of = winner.ordinal
 
 
 def has_legacy_files(out_dir: Path) -> bool:
@@ -883,13 +984,14 @@ def run(
     """Download ``plan`` into ``out_dir``, reporting honestly. Returns an exit code.
 
     Duplicate detection is the caller's job, not this function's. A scan costs a
-    request per chapter and decides what should not be fetched at all, so it
-    belongs before the run, not inside it: the caller scans the plan, calls
-    ``mark_duplicates``, and passes the same records here. ``run`` only honours
-    ``duplicate_of`` flags that are already set. Scanning again here would fetch
-    page 1 twice for every chapter and would overwrite the page count of a
-    chapter that is already fully downloaded with the count of a page it cannot
-    see -- so ``run`` leaves ``record.pages`` to ``download_chapter``.
+    handful of requests per chapter and decides what should not be fetched at
+    all, so it belongs before the run, not inside it: the caller scans the plan,
+    calls ``mark_duplicates``, and passes the same records here. ``run`` only
+    honours ``duplicate_of`` flags that are already set. Scanning again here
+    would fetch the fingerprint pages twice for every chapter and would overwrite
+    the page count of a chapter that is already fully downloaded with the count
+    of a page it cannot see -- so ``run`` leaves ``record.pages`` to
+    ``download_chapter``.
 
     The manifest is saved after every chapter, including a failed one. That is
     what makes an interrupted run resumable without renumbering: the ordinals
@@ -1198,9 +1300,9 @@ def parse_args(argv: list[str] | None = None):
             "ordinal pinned in chapters.json."
         ),
         epilog=(
-            "A run scans one chapter page and one image per chapter before "
-            "downloading anything, so duplicate re-uploads are settled before "
-            "bytes are written. --dry-run skips that scan."
+            "A run scans one chapter page and up to four images per chapter "
+            "before downloading anything, so duplicate re-uploads are settled "
+            "before bytes are written. --dry-run skips that scan."
         ),
     )
     parser.add_argument(
@@ -1282,8 +1384,8 @@ def execute(setup: Setup, args) -> int:
     if has_legacy_files(setup.out_dir):
         # Checked before the scan, not after. ``prepare`` has already spent the
         # one chapter-list POST to build the plan, but the scan is the expensive
-        # half -- two requests per chapter, ~600 for a full series -- and it
-        # would be spent reaching a refusal this check can make from what is
+        # half -- up to five requests per chapter, ~1500 for a full series -- and
+        # it would be spent reaching a refusal this check can make from what is
         # already on disk.
         print(archive_hint(setup.out_dir))
         return 1
@@ -1295,7 +1397,8 @@ def execute(setup: Setup, args) -> int:
 
     print(
         f"scanning {len(setup.plan)} chapter(s) for duplicates: the chapter page "
-        f"and page 1 of each are fetched first, so no page is downloaded twice"
+        f"and the first four images of each are fetched first, so no page is "
+        f"downloaded twice"
     )
     scanned: list[ChapterRecord] = []
     for record in setup.plan:
@@ -1341,7 +1444,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             # Deliberately no scan: --dry-run answers "what would you download?",
             # and a scan answers "which are duplicates?" -- a question the user
-            # did not ask, costing a request per chapter on a 300-chapter series.
+            # did not ask, costing five requests per chapter on a 300-chapter
+            # series.
             print("dry run: nothing scanned, nothing written")
             return 0
         return execute(setup, args)

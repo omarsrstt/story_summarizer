@@ -334,10 +334,36 @@ def test_a_non_200_chapter_page_raises(tmp_path, monkeypatch):
 
 # -- duplicates are settled before any bytes are written --------------------
 import base64  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
 
-from comic_images import average_hash  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
+
+import comic_images  # noqa: E402
+from comic_images import average_hash, chapter_fingerprint  # noqa: E402
 from comic_manifest import Manifest  # noqa: E402
+
+
+def _png(pixels) -> bytes:
+    buffer = io.BytesIO()
+    Image.fromarray(np.array(pixels, dtype=np.uint8)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _quad(top_left, top_right, bottom_left, bottom_right) -> bytes:
+    """A 32x32 page whose four quadrants are separately black or white.
+
+    Flat fills all hash to the same value (a mean with nothing above it), so the
+    pages a fingerprint test needs must have structure. This is the smallest
+    picture that reliably produces distinct hashes.
+    """
+    top = np.hstack([np.full((16, 16), top_left), np.full((16, 16), top_right)])
+    bottom = np.hstack(
+        [np.full((16, 16), bottom_left), np.full((16, 16), bottom_right)]
+    )
+    return _png(np.vstack([top, bottom]))
+
 
 #: A real, decodable 16x16 checkerboard PNG.
 #:
@@ -351,11 +377,42 @@ PAGE_IMAGE = base64.b64decode(
     "FQDA/X+BQnmBUwAAAABJRU5ErkJggg=="
 )
 
+#: Three distinct decodable pages, so a fingerprint of pages 2-4 is 3 hashes.
+PAGE_B = _quad(255, 0, 0, 255)
+PAGE_C = _quad(0, 255, 255, 0)
+PAGE_D = _quad(255, 255, 0, 0)
+
+
+def _flipped(fingerprint: str, count: int, *, start: int = 0) -> str:
+    """``fingerprint`` with exactly ``count`` of its bits inverted from ``start``.
+
+    The measured numbers this file encodes are in bits -- 0 for a true duplicate,
+    337/768 for two chapters sharing an opener -- so the fixtures are built to a
+    bit distance rather than by hand-picking images and hoping. ``start`` lets two
+    fixtures differ from the original by a similar amount while differing from
+    each other by a lot, which is what keeps them out of one another's chain.
+    """
+    bits = bin(int(fingerprint, 16))[2:].zfill(len(fingerprint) * 4)
+    inverted = "".join(
+        ("0" if bit == "1" else "1") if start <= index < start + count else bit
+        for index, bit in enumerate(bits)
+    )
+    return f"{int(inverted, 2):0{len(fingerprint)}x}"
+
+
+#: What ``scan_chapter`` really stores: three page hashes, 768 bits.
+FINGERPRINT = chapter_fingerprint([PAGE_IMAGE, PAGE_B, PAGE_C, PAGE_D])
+
+
+def test_the_fixture_fingerprint_is_three_page_hashes():
+    assert len(FINGERPRINT) == 192
+    assert FINGERPRINT == average_hash(PAGE_B) + average_hash(PAGE_C) + average_hash(PAGE_D)
+
 
 def test_the_chapter_with_more_pages_wins_a_duplicate_pair():
     short = ChapterRecord(ordinal=1, slug="a", label="Chapter 144.0", number=144.0, pages=80)
     long = ChapterRecord(ordinal=2, slug="b", label="Chapter 144", number=144.0, pages=81)
-    short.content_hash = long.content_hash = "f" * 64
+    short.content_hash = long.content_hash = FINGERPRINT
 
     cs.mark_duplicates([short, long])
 
@@ -363,10 +420,68 @@ def test_the_chapter_with_more_pages_wins_a_duplicate_pair():
     assert long.duplicate_of is None
 
 
+def test_a_true_duplicate_pair_is_marked():
+    # Measured on the live site: 144/144.0 and 150/150.0 are 0 bits apart out of
+    # 768 once pages 2-4 are compared.
+    kept = ChapterRecord(ordinal=1, slug="a", label="Chapter 144", number=144.0, pages=81)
+    dupe = ChapterRecord(ordinal=2, slug="b", label="Chapter 144.0", number=144.0, pages=81)
+    kept.content_hash = dupe.content_hash = FINGERPRINT
+
+    cs.mark_duplicates([kept, dupe])
+
+    assert dupe.duplicate_of == 1
+    assert kept.duplicate_of is None
+
+
+def test_a_true_duplicate_with_a_re_encoded_page_is_still_marked():
+    # Slack for a re-encode is what an average hash exists to provide. Equality
+    # on the string was too brittle for a 768-bit fingerprint.
+    kept = ChapterRecord(ordinal=1, slug="a", label="Chapter 150", number=150.0, pages=81)
+    dupe = ChapterRecord(ordinal=2, slug="b", label="Chapter 150.0", number=150.0, pages=81)
+    kept.content_hash = FINGERPRINT
+    dupe.content_hash = _flipped(FINGERPRINT, 20)
+
+    cs.mark_duplicates([kept, dupe])
+
+    assert dupe.duplicate_of == 1
+
+
+def test_two_chapters_sharing_an_opener_are_not_duplicates():
+    # THE REGRESSION TEST for the live bug. 175.1 and 175.2 share a byte-identical
+    # page 1 (0 bits apart there) and are 337 bits apart out of 768 on pages 2-4.
+    # The old page-1 fingerprint called them equal and dropped a real chapter.
+    first = ChapterRecord(ordinal=1, slug="a", label="Chapter 175.1", number=175.1, pages=4)
+    second = ChapterRecord(ordinal=2, slug="b", label="Chapter 175.2", number=175.2, pages=4)
+    first.content_hash = FINGERPRINT
+    second.content_hash = _flipped(FINGERPRINT, 337)
+
+    cs.mark_duplicates([first, second])
+
+    assert first.duplicate_of is None
+    assert second.duplicate_of is None
+
+
+def test_the_threshold_scales_with_the_number_of_pages_hashed():
+    # 10 bits of slack per page hash: 30 out of 768 for a three-page fingerprint.
+    # The two neighbours flip disjoint bit ranges, otherwise they would also be
+    # within the threshold of each other and group together as one chapter.
+    kept = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0, pages=10)
+    within = ChapterRecord(ordinal=2, slug="b", label="Chapter 2", number=2.0, pages=10)
+    beyond = ChapterRecord(ordinal=3, slug="c", label="Chapter 3", number=3.0, pages=10)
+    kept.content_hash = FINGERPRINT
+    within.content_hash = _flipped(FINGERPRINT, 30)
+    beyond.content_hash = _flipped(FINGERPRINT, 31, start=400)
+
+    cs.mark_duplicates([kept, within, beyond])
+
+    assert within.duplicate_of == 1
+    assert beyond.duplicate_of is None
+
+
 def test_a_duplicate_pair_is_decided_regardless_of_reading_order():
     short = ChapterRecord(ordinal=1, slug="a", label="Chapter 144.0", number=144.0, pages=80)
     long = ChapterRecord(ordinal=2, slug="b", label="Chapter 144", number=144.0, pages=81)
-    short.content_hash = long.content_hash = "f" * 64
+    short.content_hash = long.content_hash = FINGERPRINT
 
     cs.mark_duplicates([long, short])
 
@@ -376,7 +491,7 @@ def test_a_duplicate_pair_is_decided_regardless_of_reading_order():
 def test_distinct_chapters_are_not_marked_duplicates():
     one = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0, pages=50)
     two = ChapterRecord(ordinal=2, slug="b", label="Chapter 2", number=2.0, pages=51)
-    one.content_hash, two.content_hash = "0" * 64, "f" * 64
+    one.content_hash, two.content_hash = _flipped(FINGERPRINT, 400), FINGERPRINT
     cs.mark_duplicates([one, two])
     assert one.duplicate_of is None and two.duplicate_of is None
 
@@ -391,10 +506,25 @@ def test_chapters_that_could_not_be_hashed_are_never_duplicates():
     assert one.duplicate_of is None and two.duplicate_of is None
 
 
+def test_fingerprints_of_different_lengths_are_never_duplicates():
+    # A one-page fingerprint and a three-page one have no meaningful distance.
+    # Erring towards "not a duplicate" is deliberate: a false duplicate silently
+    # drops a real chapter, a missed duplicate only wastes bandwidth.
+    three_pages = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0, pages=4)
+    one_page = ChapterRecord(ordinal=2, slug="b", label="Chapter 2", number=2.0, pages=2)
+    three_pages.content_hash = FINGERPRINT
+    one_page.content_hash = FINGERPRINT[:64]
+
+    cs.mark_duplicates([three_pages, one_page])
+
+    assert three_pages.duplicate_of is None
+    assert one_page.duplicate_of is None
+
+
 def test_a_page_count_tie_is_won_by_the_lower_ordinal_whatever_the_list_order():
     first = ChapterRecord(ordinal=1, slug="a", label="Chapter 144", number=144.0, pages=80)
     second = ChapterRecord(ordinal=2, slug="b", label="Chapter 144.0", number=144.0, pages=80)
-    first.content_hash = second.content_hash = "f" * 64
+    first.content_hash = second.content_hash = FINGERPRINT
 
     cs.mark_duplicates([second, first])
 
@@ -402,12 +532,28 @@ def test_a_page_count_tie_is_won_by_the_lower_ordinal_whatever_the_list_order():
     assert second.duplicate_of == 1
 
 
+def test_a_chain_of_near_matches_keeps_one_survivor():
+    # A matches B and B matches C, so all three are the same chapter even though
+    # the ends are further apart than the threshold.
+    first = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0, pages=10)
+    second = ChapterRecord(ordinal=2, slug="b", label="Chapter 2", number=2.0, pages=10)
+    third = ChapterRecord(ordinal=3, slug="c", label="Chapter 3", number=3.0, pages=10)
+    first.content_hash = FINGERPRINT
+    second.content_hash = _flipped(FINGERPRINT, 20)
+    third.content_hash = _flipped(FINGERPRINT, 40)
+
+    cs.mark_duplicates([first, second, third])
+
+    assert second.duplicate_of == 1
+    assert third.duplicate_of == 1
+
+
 def test_rescanning_clears_a_stale_duplicate_flag():
     kept = ChapterRecord(ordinal=1, slug="a", label="Chapter 144", number=144.0, pages=80)
     stale = ChapterRecord(ordinal=2, slug="b", label="Chapter 144.0", number=144.0,
                           pages=80, duplicate_of=1)
-    kept.content_hash = "f" * 64
-    # This time the dupe's page 1 could not be hashed, so it is no longer known
+    kept.content_hash = FINGERPRINT
+    # This time the dupe's pages could not be hashed, so it is no longer known
     # to be the same chapter and must not stay marked as one.
     stale.content_hash = ""
 
@@ -416,16 +562,47 @@ def test_rescanning_clears_a_stale_duplicate_flag():
     assert stale.duplicate_of is None
 
 
-def test_a_scan_fills_the_page_count_and_hash(monkeypatch):
-    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
-    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page, page + "?2")))
-    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, PAGE_IMAGE))
+def test_a_scan_fingerprints_pages_two_to_four(monkeypatch):
+    # Four pages listed, so the fingerprint covers pages 2, 3 and 4. Each is
+    # served a different picture so the result can be checked position by
+    # position -- and so that a fingerprint that accidentally included page 1
+    # would be visibly wrong rather than coincidentally right.
+    pages = {
+        "ch_9_1.jpg": PAGE_IMAGE,
+        "ch_9_2.jpg": PAGE_B,
+        "ch_9_3.jpg": PAGE_C,
+        "ch_9_4.jpg": PAGE_D,
+    }
+    html = _page_html(*(f"https://c4.comic-site.test/x/chapter_9/{name}" for name in pages))
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
+    monkeypatch.setattr(
+        cs, "bytes_transport", lambda u, h, c: (200, pages[u.rsplit("/", 1)[-1]])
+    )
     record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
 
     scanned = cs.scan_chapter(SERIES, record)
 
-    assert scanned.pages == 2
-    assert scanned.content_hash == average_hash(PAGE_IMAGE)
+    assert scanned.pages == 4
+    assert scanned.content_hash == FINGERPRINT
+    # Page 1 is not in it at all.
+    assert average_hash(PAGE_IMAGE) not in scanned.content_hash
+
+
+def test_a_scan_fetches_no_more_than_page_one_plus_the_fingerprint_pages(monkeypatch):
+    # Five pages listed: 1 to skip and 3 to hash is four images, not five.
+    names = [f"ch_9_{index}.jpg" for index in range(1, 6)]
+    html = _page_html(*(f"https://c4.comic-site.test/x/chapter_9/{name}" for name in names))
+    fetched = []
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
+    monkeypatch.setattr(
+        cs, "bytes_transport", lambda u, h, c: (fetched.append(u.rsplit("/", 1)[-1]), (200, PAGE_B))[1]
+    )
+    record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
+
+    cs.scan_chapter(SERIES, record)
+
+    assert fetched == names[:4]
+    assert len(record.content_hash) == 192
 
 
 def test_a_scan_writes_no_pages(tmp_path, monkeypatch):
@@ -439,7 +616,7 @@ def test_a_scan_writes_no_pages(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_a_scan_that_cannot_hash_page_one_leaves_the_hash_empty(monkeypatch):
+def test_a_scan_that_cannot_fetch_any_page_leaves_the_fingerprint_empty(monkeypatch):
     page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
     monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (404, b""))
@@ -451,7 +628,7 @@ def test_a_scan_that_cannot_hash_page_one_leaves_the_hash_empty(monkeypatch):
     assert scanned.content_hash == ""
 
 
-def test_a_truncated_page_one_is_unhashable_not_a_crash(monkeypatch):
+def test_a_truncated_page_is_unhashable_not_a_crash(monkeypatch):
     # JPEG carries the magic bytes but is not a decodable picture, which is what
     # a response cut off mid-transfer looks like. It must read as "could not
     # hash", not abort the scan of the whole series.
@@ -464,6 +641,33 @@ def test_a_truncated_page_one_is_unhashable_not_a_crash(monkeypatch):
 
     assert scanned.pages == 1
     assert scanned.content_hash == ""
+
+
+def test_one_unfetchable_fingerprint_page_does_not_shift_the_rest(monkeypatch):
+    # Page 3 fails. If the failure were dropped from the list instead of keeping
+    # its slot, page 4 would move up into page 3's position and this chapter's
+    # fingerprint would disagree with every scan that saw all four pages -- two
+    # fingerprints of different lengths, which never compare.
+    pages = {
+        "ch_9_1.jpg": PAGE_IMAGE,
+        "ch_9_2.jpg": PAGE_B,
+        "ch_9_4.jpg": PAGE_D,
+    }
+    html = _page_html(
+        *(f"https://c4.comic-site.test/x/chapter_9/ch_9_{index}.jpg" for index in range(1, 5))
+    )
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, html))
+    monkeypatch.setattr(
+        cs, "bytes_transport",
+        lambda u, h, c: (200, pages[u.rsplit("/", 1)[-1]])
+        if u.rsplit("/", 1)[-1] in pages
+        else (500, b""),
+    )
+    record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
+
+    scanned = cs.scan_chapter(SERIES, record)
+
+    assert scanned.content_hash == average_hash(PAGE_B) + average_hash(PAGE_D)
 
 
 def test_a_legacy_page_file_blocks_the_run(tmp_path, capsys):
@@ -577,13 +781,13 @@ def test_a_dry_run_writes_no_pages_but_still_saves_the_manifest(
 def test_a_failed_scan_cannot_lend_its_stale_hash_to_a_live_chapter(
     tmp_path, monkeypatch
 ):
-    # The manifest restores last run's hash onto each record. If a scan fails and
-    # the old hash survives, a *different* chapter that hashes to that value this
-    # run is marked as its duplicate -- one real chapter skipped on the strength
-    # of a scan that could not run.
+    # The manifest restores last run's fingerprint onto each record. If a scan
+    # fails and the old value survives, a *different* chapter that hashes to that
+    # value this run is marked as its duplicate -- one real chapter skipped on the
+    # strength of a scan that could not run.
     stale = ChapterRecord(
         ordinal=1, slug="chapter-1", label="Chapter 1", number=1.0,
-        pages=9, content_hash="f" * 64,
+        pages=9, content_hash="f" * 192,
     )
     live = ChapterRecord(ordinal=2, slug="chapter-2", label="Chapter 2", number=2.0)
     manifest = Manifest("T", SERIES, [stale, live])
@@ -592,13 +796,15 @@ def test_a_failed_scan_cannot_lend_its_stale_hash_to_a_live_chapter(
     def page(url, headers, cookies):
         if "chapter-1" in url:
             return 500, ""
-        return 200, _page_html("https://c4.comic-site.test/x/chapter_2/ch_2_1.jpg")
+        # Four pages, so the scan produces a full three-hash fingerprint.
+        return 200, _page_html(
+            *(f"https://c4.comic-site.test/x/chapter_2/ch_2_{i}.jpg" for i in range(1, 5))
+        )
 
     monkeypatch.setattr(cs, "default_transport", page)
-    # Chapter 2 hashes to exactly the value chapter 1 carries from last run.
-    # ``scan_chapter`` imports it inside the function, so patch it at the source.
-    import comic_images
-
+    # Chapter 2's fingerprint comes out exactly the value chapter 1 carries from
+    # last run. ``scan_chapter`` imports ``average_hash`` inside the module it
+    # lives in, so patch it at the source.
     monkeypatch.setattr(comic_images, "average_hash", lambda payload: "f" * 64)
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, PAGE_IMAGE))
 
@@ -617,6 +823,7 @@ def test_a_failed_scan_cannot_lend_its_stale_hash_to_a_live_chapter(
     assert saved.chapters[0].content_hash == ""
     assert saved.chapters[0].pages == 0
     assert saved.chapters[1].duplicate_of is None
+    assert len(saved.chapters[1].content_hash) == 192
 
 
 # -- the plan is refused before it is fetched --------------------------------
