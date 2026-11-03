@@ -245,14 +245,37 @@ command; move the old tree into the gitignored `unused/2026-11-01-pre-ordinal/` 
 is ever deleted automatically.
 
 **Duplicates are settled before anything is downloaded.** Before downloading, the run scans each
-selected chapter: one request for the chapter page (page count) and one for page 1 (a 16×16
-average hash). Chapters with the same page-1 hash are duplicates; within a group the chapter with
-**more pages wins** (the re-upload can lose a page — `144` has 81, `144.0` has 80) and the loser is
-marked `duplicate_of` and skipped. That is a request per chapter up front — roughly 600 for a
-300-chapter series — and it is deliberate: it is how the duplicate question is answered once, before
-any bytes are written, rather than after downloading both copies. The flags are **re-derived every
-run** from a fresh scan and saved back to `chapters.json`; a stale value in the file is never
-trusted, because the question is about the pages as they are now.
+selected chapter: one request for the chapter page (page count) and up to three for **pages 2–4**,
+each reduced to a 16×16 average hash and concatenated into one 768-bit fingerprint. Two chapters
+are duplicates when their fingerprints are within 30 bits — ten bits of slack per hashed page, for
+a re-encode. Within a group the chapter with **more pages wins** (the re-upload can lose a page —
+`144` has 81, `144.0` has 80), ties go to the earlier ordinal, and the loser is marked
+`duplicate_of` and skipped. That is four requests per chapter up front — roughly 1200 for a
+300-chapter series — and it is deliberate: it is how the duplicate question is answered once,
+before any bytes are written, rather than after downloading both copies. The flags are
+**re-derived every run** from a fresh scan and saved back to `chapters.json`; a stale value in the
+file is never trusted, because the question is about the pages as they are now.
+
+**Page 1 is never hashed, and never fetched.** It looks like the obvious fingerprint and is wrong
+in both directions, measured on this series:
+
+| pair | truth | page 1 | pages 2–4 |
+| --- | --- | --- | --- |
+| `144` / `144.0` | same chapter twice | 88 bits apart | 0 of 768 |
+| `150` / `150.0` | same chapter twice | 3 bits apart | 0 of 768 |
+| `175.1` / `175.2` | two different chapters | **0 (identical)** | 337 of 768 |
+
+A re-upload can start at a different opener, so page 1 *misses* real duplicates. And distinct
+chapters can share a cover, so page 1 *manufactures* them — the first version of this did exactly
+that and silently skipped `175.2`, four real pages, which is the failure this whole stage exists to
+prevent. Pages 2 onwards separate the two cases completely. A side effect worth knowing: a chapter
+too short to have three pages hashable gets a shorter fingerprint, and shorter never matches
+longer. That is deliberate. A false duplicate drops a real chapter; a missed one only costs
+bandwidth, so every ambiguous case falls on the cheap side.
+
+**On Windows, quote a comma-separated `-c`.** PowerShell treats `,` as its own array separator, so
+`-c 144,144.0` arrives as two arguments and argparse keeps only `144` — it downloads half your
+selection and says nothing. Write `-c "144,144.0"`.
 
 **`-c` here and `-c` in `summarize.py` are different namespaces.** The download stage takes *site
 labels* (`-c 175.1`), because those are what you read on the site. `summarize.py` takes *ordinals*
