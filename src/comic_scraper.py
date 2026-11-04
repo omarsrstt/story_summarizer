@@ -46,6 +46,7 @@ followed, and no JavaScript is ever executed.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -683,9 +684,16 @@ def download_chapter(
             continue
 
         # Written under its final name only after the bytes are known to be an
-        # image, so a half-finished run never leaves a file that looks like a
-        # page but cannot be read.
-        path.write_bytes(payload)
+        # image AND completely on disk. ``write_bytes`` alone is not enough: a
+        # write interrupted mid-call (Ctrl+C, power loss, a full disk) leaves a
+        # truncated file, and every later run would treat it as a finished page
+        # -- ``path.exists()`` above skips it, and ``pages_on_disk`` counts it,
+        # so the chapter could exit 0 holding a page nothing can read. The
+        # temporary name is not a page name, so an interrupted write leaves
+        # nothing that ``pages_on_disk`` or the reader will pick up.
+        tmp = path.with_name(path.name + ".part")
+        tmp.write_bytes(payload)
+        os.replace(tmp, path)
         saved += 1
         print(f"  {name}: saved")
 
@@ -695,27 +703,6 @@ def download_chapter(
         f"of {record.pages} listed"
     )
     return ChapterResult(record=record, saved=saved, failed=failed, on_disk=on_disk)
-
-
-# -- network ---------------------------------------------------------------
-
-
-def open_session():
-    """A ``curl_cffi`` session presenting a real browser's TLS fingerprint.
-
-    The chapter pages sit behind a bot check that refuses a plain HTTP client
-    with a 403 challenge. JavaScript is never executed, which is the point: the
-    pages carry obfuscated redirect scripts.
-    """
-
-    try:
-        from curl_cffi import requests
-    except ImportError:
-        raise SystemExit(
-            "comic scraping needs the 'scraper' extra:\n"
-            "  uv sync --extra comic --extra scraper"
-        ) from None
-    return requests.Session(impersonate="chrome")
 
 
 # -- deciding what not to download -----------------------------------------

@@ -35,7 +35,7 @@ All numbers come from probing the live series list (300 entries) and page HTML.
 | The site list comes back **newest-first** and is in reading order when reversed | The raw response begins `chapter-280-237` and ends `chapter-1`. Reversed, it reads `…174, 175, 175.1 … 175.19, 176, 177…`. |
 | Reading order is **not** the numeric label order | Sorted numerically, `175` would come before `175.1`; the site puts `175.1` first. So list position is authority, not the number. `175.1`–`175.19` were inserted between 175 and 176 after the fact. |
 | The list needs no cookies and no browser | A cold `curl_cffi` session with only `X-Requested-With` returned 200 and all 300 entries. No `cf_clearance`, no `undetected_chromedriver`. |
-| Page 1 is **not** shared boilerplate | Average-hash distance between page 1 of distinct chapters: 104–161 of 256. Only pages of the same art score ≈0 (the `144`/`144.0` pair). Hashing from page 1 is therefore safe. |
+| Page 1 is **not** shared boilerplate | Average-hash distance between page 1 of distinct chapters: 104–161 of 256. Only pages of the same art score ≈0. ⚠️ **This row is wrong and is kept as a record of the error — see §7.6.** The method measured *distinct* chapters and never tested *duplicate* ones. Both real duplicates differ on page 1 (88 and 3 bits), and two distinct chapters were measured byte-identical there (`175.1`/`175.2`). Page 1 is the one page that must not be hashed. |
 
 ## 3. Goals
 
@@ -190,11 +190,34 @@ failure, or a chapter that ends up with zero pages on disk, is a failure.
 
 ### 7.6 Duplicate detection
 
+> **Superseded 2026-11-02 — do not implement this as written.** The rule below was
+> implemented, shipped, and silently dropped a real chapter (`175.2`, 4 pages) on the first
+> live run. The premise in the last sentence is false. Keep reading for what replaced it.
+
 Compute a 16×16 average hash (PIL + numpy, already in the `comic` extra) for the
 chapter's pages and compare against chapters already indexed; a per-page distance
-≤10/256 is the same picture. **Hash from page 1**, which was verified not to be shared
-boilerplate (distinct chapters differ by 104–161/256). A chapter whose pages match
+≤10/256 is the same picture. ~~**Hash from page 1**, which was verified not to be shared
+boilerplate (distinct chapters differ by 104–161/256).~~ A chapter whose pages match
 another's is marked `duplicate_of`, printed with both labels, and not saved.
+
+**What actually works, and why page 1 fails in both directions.** Measured on the live site:
+
+| pair | truth | page 1 | pages 2–4 |
+| --- | --- | --- | --- |
+| `144` / `144.0` | same chapter twice | 88 bits apart | 0 of 768 |
+| `150` / `150.0` | same chapter twice | 3 bits apart | 0 of 768 |
+| `175.1` / `175.2` | two different chapters | **0 (identical)** | 337 of 768 |
+
+A re-upload can begin at a different opener, so page 1 *misses* real duplicates. Two different
+chapters can share a cover, so page 1 *invents* them — that is what dropped `175.2`. The
+replacement hashes **pages 2–4** into one 768-bit fingerprint and compares by hamming distance
+(`DUPLICATE_DISTANCE` per hashed page, so 30 of 768), which separates every measured pair with
+room to spare. Page 1 is not fetched at all. Empty and different-length fingerprints never
+match, deliberately: a false duplicate drops a real chapter, a missed one only costs bandwidth.
+See `src/comic_images.py:chapter_fingerprint` and `src/comic_scraper.py:_is_duplicate`.
+
+The methodological lesson, since this file is the record: measuring whether *distinct* things
+differ says nothing about whether *duplicates* match. Both must be measured.
 
 The download stage already needs the `comic` extra for this, so it is declared as
 requiring `uv sync --extra comic --extra scraper` and fails with that exact message

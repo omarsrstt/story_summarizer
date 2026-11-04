@@ -253,6 +253,41 @@ def test_pages_are_saved_under_the_ordinal(tmp_path, monkeypatch):
     assert (result.saved, result.failed, result.on_disk) == (1, 0, 1)
 
 
+def test_an_interrupted_write_leaves_no_file_that_counts_as_a_page(tmp_path, monkeypatch):
+    # A write interrupted mid-call (Ctrl+C, power loss, a full disk) must not
+    # leave a truncated page that every later run treats as finished: the
+    # existence check would skip it and ``pages_on_disk`` would count it, so the
+    # chapter could exit 0 holding a page nothing can read. The bytes go to a
+    # temporary name first, so a kill between the write and the rename leaves a
+    # ``.part`` file -- not a page name, and not counted.
+    page = "https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"
+    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, PAGE_IMAGE))
+    record = ChapterRecord(ordinal=9, slug="chapter-9", label="Chapter 9", number=9.0)
+
+    def half_write(self, payload):
+        # A real interrupted write: half the bytes reach the file, then the
+        # machine goes away. This is what distinguishes the two implementations
+        # -- writing straight to the page name leaves a readable-looking stub.
+        with open(self, "wb") as handle:
+            handle.write(payload[: len(payload) // 2])
+        raise KeyboardInterrupt("power loss")
+
+    monkeypatch.setattr(type(tmp_path / "x"), "write_bytes", half_write)
+
+    try:
+        cs.download_chapter(SERIES, record, tmp_path, delay=0)
+    except KeyboardInterrupt:
+        pass
+
+    assert cs.pages_on_disk(tmp_path, 9) == 0
+    # The partial bytes may survive under the temporary name. What must not
+    # survive is a file wearing a page's name -- that is the one the existence
+    # check and the reader would both accept.
+    assert [p.name for p in tmp_path.iterdir() if p.suffix in {".jpg", ".jpeg", ".png", ".webp"}] == []
+    assert list(tmp_path.glob("*.part"))
+
+
 def test_a_page_that_saves_nothing_is_reported_as_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cs, "default_transport", lambda u, h, c: (200, _page_html("https://c4.comic-site.test/x/a.jpg"))
