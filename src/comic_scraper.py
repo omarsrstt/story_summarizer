@@ -558,7 +558,7 @@ def page_urls(html: str) -> list[str]:
 
     Real chapter images are lazy-loaded: ``src`` is a placeholder loader and the
     address to fetch is in ``data-src``. Only ``data-src`` is read -- the
-    placeholder lives on ``comic-site.test`` too, so it would pass
+    placeholder lives on the site itself, so it would pass
     ``safe_image_url`` and be downloaded as if it were a page. Off-site URLs are
     dropped here as well as at fetch time, so nothing downstream ever holds one.
     """
