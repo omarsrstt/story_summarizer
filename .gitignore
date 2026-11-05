@@ -194,6 +194,9 @@ src/comic_site.json
 # Working artifacts for plan execution (ledger, briefs, review packages)
 .superpowers/
 
+# Superpowers plan/spec/design records: working notes, not project documentation
+docs/superpowers/
+
 # Throwaway analysis / scratch (kept locally, never published)
 spike_out/
 
