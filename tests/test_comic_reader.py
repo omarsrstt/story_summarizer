@@ -164,3 +164,59 @@ def test_the_tracked_config_never_names_a_site():
 
     assert "comic_series_url" not in config
     assert "comic_site_host" not in config
+
+
+# -- transcripts land where the summariser looks ---------------------------
+
+
+def test_transcripts_go_to_the_summarisers_novel_dir(tmp_path):
+    # The bug this prevents: comics write to one novels dir and summarize.py
+    # reads another. They agree today only because both default to "novels", so
+    # this pins them together through the summariser's own key.
+    import json
+
+    from comic_reader import load_config
+
+    (tmp_path / "comic_config.json").write_text(
+        json.dumps({"glossary": ["SAPIN"]}), encoding="utf-8"
+    )
+    (tmp_path / "summarizer_config.json").write_text(
+        json.dumps({"NOVEL_DIR": "custom-novels"}), encoding="utf-8"
+    )
+
+    config = load_config(tmp_path / "comic_config.json")
+
+    assert config["novels_dir"] == "custom-novels"
+    assert config["glossary"] == ["SAPIN"]
+
+
+def test_a_deliberate_novels_dir_still_wins(tmp_path):
+    # Separating comic transcripts from novel text is a legitimate choice; the
+    # summariser's value is a default, not an override.
+    import json
+
+    from comic_reader import load_config
+
+    (tmp_path / "comic_config.json").write_text(
+        json.dumps({"novels_dir": "comic-text"}), encoding="utf-8"
+    )
+    (tmp_path / "summarizer_config.json").write_text(
+        json.dumps({"NOVEL_DIR": "novels"}), encoding="utf-8"
+    )
+
+    assert load_config(tmp_path / "comic_config.json")["novels_dir"] == "comic-text"
+
+
+def test_the_tracked_config_does_not_restate_the_novels_dir():
+    # The tracked file must not carry its own copy: that duplication is exactly
+    # what drifted. The key is supplied from summarizer_config.json instead.
+    import json
+
+    from comic_reader import CONFIG_PATH, load_config
+
+    tracked = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    assert "novels_dir" not in tracked
+    # ...and it still resolves, from the summariser's config.
+    assert load_config()["novels_dir"] == "novels"
+

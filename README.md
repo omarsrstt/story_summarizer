@@ -172,7 +172,9 @@ cp src/comic_site.example.json src/comic_site.json   # then fill in the two fiel
 ```
 
 `src/comic_site.json` is gitignored; everything else the comic pipeline needs is tracked in
-`src/comic_config.json` (glossary, tile geometry, output dirs).
+`src/comic_config.json` (glossary, tile geometry, output dirs). Transcripts are written to
+`NOVEL_DIR` from `summarizer_config.json` — the same setting `summarize.py` reads — so the two
+stages cannot disagree about where they are.
 
 ```bash
 uv sync --extra comic --extra scraper

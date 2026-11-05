@@ -141,9 +141,17 @@ standing rule, not a one-off cleanup, and it has already been violated once:
 
 | File | Tracked | Holds |
 | --- | --- | --- |
-| `src/comic_config.json` | **yes** | glossary, tile geometry, output dirs — no site |
+| `src/comic_config.json` | **yes** | glossary, tile geometry, `comics_dir`, `transcripts_dir` — no site |
 | `src/comic_site.json` | no (gitignored) | `comic_series_url`, `comic_site_host` |
 | `src/comic_site.example.json` | **yes** | the same two keys as placeholders |
+
+**Where transcripts go is declared once.** `comic_reader` writes
+`<NOVEL_DIR>/<slug>/chapter_NNNNN.txt` using `NOVEL_DIR` from
+`summarizer_config.json`, not a copy in `comic_config.json`, because `summarize.py`
+reads them from there. Two independent copies of that path stay equal only by luck:
+when they drifted, the reader succeeded and the next stage failed on a directory
+the user never configured. An explicit `novels_dir` in the comic config still
+wins, for deliberately separating comic output.
 
 `comic_reader.load_config` reads the tracked file and shallow-merges `comic_site.json` over it, so
 an older single-file config that still carries the site keys keeps working. A *missing* site file is

@@ -60,6 +60,15 @@ def page_filename(ordinal: int, page: int, ext: str) -> str:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
+#: Where ``summarize.py`` looks for transcripts: its own config's ``NOVEL_DIR``.
+#:
+#: Read from here rather than restated in ``comic_config.json`` because the two
+#: have to agree -- this stage *writes* ``<NOVEL_DIR>/<slug>/chapter_NNNNN.txt``
+#: and the summariser *reads* it. Two independent copies of one directory name
+#: stay equal only by coincidence, and when they drift the reader succeeds and
+#: the next stage fails on a path the user never configured.
+SUMMARIZER_CONFIG_PATH = Path(__file__).resolve().parent / "summarizer_config.json"
+
 #: The local half of the comic settings: which site a series lives on.
 #:
 #: Split out from ``comic_config.json`` for the same reason the novel scraper's
@@ -94,18 +103,23 @@ def comic_slug(series: str) -> str:
 def load_config(path: Path | None = None) -> dict:
     """Read ``comic_config.json``, with the local site settings merged in.
 
-    The tracked config holds everything that is the same for every user (glossary,
-    tile geometry, output dirs); ``comic_site.json`` holds the two keys that name
-    the site and is gitignored, mirroring ``scraper_config.json``.
+    Three sources, each owning something different:
 
-    The merge is shallow and the site file wins, so an existing single-file config
-    that still carries ``comic_series_url``/``comic_site_host`` keeps working --
-    the switch to two files needs no migration.
+    * ``comic_config.json`` (tracked) -- glossary, tile geometry, output dirs.
+    * ``comic_site.json`` (gitignored) -- the two keys that name the site,
+      mirroring ``scraper_config.json``.
+    * ``summarizer_config.json``'s ``NOVEL_DIR`` -- where transcripts go. Taken
+      from the summariser rather than restated here, because this stage writes
+      the files that stage reads.
+
+    The merges are shallow and the later source wins, so an existing single-file
+    config that still carries ``comic_series_url``/``comic_site_host`` keeps
+    working -- the switch to separate files needs no migration.
 
     A missing site file is not an error: a reader-only run needs no host, and the
     scraper reports a missing host when it actually tries to fetch. An unreadable
-    or malformed *either* file is still an error here -- silently dropping the
-    glossary over a typo would degrade every transcript without a word.
+    or malformed *either* comic file is still an error here -- silently dropping
+    the glossary over a typo would degrade every transcript without a word.
     """
 
     config_path = path or CONFIG_PATH
@@ -113,6 +127,16 @@ def load_config(path: Path | None = None) -> dict:
     site_path = config_path.with_name(SITE_CONFIG_PATH.name)
     if site_path.is_file():
         config.update(_read_json(site_path))
+
+    # ``NOVEL_DIR`` is the summariser's key, not a comic-only setting, so it is
+    # read from the summariser's config: the transcripts this stage writes are
+    # the files that stage reads. An explicit ``novels_dir`` still wins, so a
+    # config that deliberately separates comic output keeps working.
+    if "novels_dir" not in config:
+        summary_path = config_path.with_name(SUMMARIZER_CONFIG_PATH.name)
+        novel_dir = _read_json(summary_path).get("NOVEL_DIR")
+        if novel_dir:
+            config["novels_dir"] = novel_dir
     return config
 
 

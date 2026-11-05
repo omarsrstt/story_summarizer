@@ -17,13 +17,15 @@
     "a bubble straddling a seam whole in at least one tile; duplicates across a",
     "seam are dropped when the transcript is assembled.",
     "",
-    "comics_dir / transcripts_dir / novels_dir resolve relative to the repo",
-    "root (parent of src/), matching summarizer_config.json."
+    "comics_dir / transcripts_dir resolve relative to the repo root (parent of",
+    "src/), matching summarizer_config.json. There is deliberately no novels_dir",
+    "here: transcripts are written to summarizer_config.json's NOVEL_DIR, because",
+    "summarize.py reads them from there and two copies of that path would stay",
+    "equal only by luck."
   ],
 
   "comics_dir": "comics",
   "transcripts_dir": "transcripts",
-  "novels_dir": "novels",
 
   "tile_height": 1200,
   "tile_overlap": 120,
