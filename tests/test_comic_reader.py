@@ -94,3 +94,73 @@ def test_only_single_and_range_and_list():
 
 def test_only_ignores_numbers_not_present():
     assert parse_only("5", [0, 1]) == []
+
+
+# -- the tracked config and the local site file ----------------------------
+
+
+def test_the_site_file_is_merged_over_the_tracked_config(tmp_path):
+    # The split the whole layout depends on: tracked file says how to read,
+    # local file says where. Both must arrive in one dict, or the scraper and
+    # the reader would see different configs.
+    import json
+
+    from comic_reader import load_config
+
+    (tmp_path / "comic_config.json").write_text(
+        json.dumps({"glossary": ["SAPIN"], "tile_height": 900}), encoding="utf-8"
+    )
+    (tmp_path / "comic_site.json").write_text(
+        json.dumps({"comic_site_host": "comic-site.test"}), encoding="utf-8"
+    )
+
+    config = load_config(tmp_path / "comic_config.json")
+
+    assert config["glossary"] == ["SAPIN"]
+    assert config["tile_height"] == 900
+    assert config["comic_site_host"] == "comic-site.test"
+
+
+def test_a_missing_site_file_leaves_the_tracked_config_usable(tmp_path):
+    # A reader-only run needs no site; only the downloader does. Returning {}
+    # here would take the glossary with it and degrade every transcript.
+    import json
+
+    from comic_reader import load_config
+
+    (tmp_path / "comic_config.json").write_text(
+        json.dumps({"glossary": ["SAPIN"]}), encoding="utf-8"
+    )
+
+    assert load_config(tmp_path / "comic_config.json")["glossary"] == ["SAPIN"]
+
+
+def test_a_single_file_config_with_the_site_inside_still_works(tmp_path):
+    # The two-file layout must not require migrating an existing config: the
+    # merge is shallow, so site keys already in comic_config.json survive.
+    import json
+
+    from comic_reader import load_config
+
+    (tmp_path / "comic_config.json").write_text(
+        json.dumps({"comic_site_host": "comic-site.test", "glossary": ["SAPIN"]}),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path / "comic_config.json")
+
+    assert config["comic_site_host"] == "comic-site.test"
+    assert config["glossary"] == ["SAPIN"]
+
+
+def test_the_tracked_config_never_names_a_site():
+    # The rule this split exists to enforce. A real host here would publish
+    # which site the tool targets, which is the thing being avoided.
+    import json
+
+    from comic_reader import CONFIG_PATH
+
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    assert "comic_series_url" not in config
+    assert "comic_site_host" not in config

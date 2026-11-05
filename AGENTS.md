@@ -134,6 +134,37 @@ So the join between comic and novel stages is **plain integers on disk**. Neithe
 nor `summarize.py` knows the comic scraper exists, and neither was modified for it. That is why the
 manifest pins ordinals rather than trusting site numbers.
 
+### Config: the site is never tracked
+
+The repo is **public**, so the site this tool targets is deliberately absent from it — this is a
+standing rule, not a one-off cleanup, and it has already been violated once:
+
+| File | Tracked | Holds |
+| --- | --- | --- |
+| `src/comic_config.json` | **yes** | glossary, tile geometry, output dirs — no site |
+| `src/comic_site.json` | no (gitignored) | `comic_series_url`, `comic_site_host` |
+| `src/comic_site.example.json` | **yes** | the same two keys as placeholders |
+
+`comic_reader.load_config` reads the tracked file and shallow-merges `comic_site.json` over it, so
+an older single-file config that still carries the site keys keeps working. A *missing* site file is
+fine (a reader-only run needs no host); the downloader refuses to start without `comic_series_url`
+and says which file to copy. `comic_scraper.DEFAULT_SERIES_URL`/`DEFAULT_SITE_HOST` are placeholders
+on the reserved `.test` suffix: they match nothing, so an unconfigured run refuses every image
+rather than fetching from a guess.
+
+Two traps, both already hit:
+
+- **Never use `example.com` as the placeholder.** The host check accepts subdomains of the
+  configured host, so `example.com` would also accept `evil.example.com` — the guard's own test
+  case. `.test` is reserved and safe.
+- **Scrubbing the file is not enough.** The site was in the tracked config *and* in 19 commits of
+  history; anyone can read old commits. Publishing required a history rewrite, not just an edit.
+  New site-bearing work must therefore never be committed in the first place.
+
+`src/scraper_config.json` follows the same rule for the novel scraper, with
+`src/scraper_config.example.json` tracked. Any new scraper stage should get its own example +
+gitignored real file rather than putting a host in a tracked config.
+
 **Ordinal = reading-order position, not the site's chapter number.** They differ constantly. The
 CDN files chapter N under `chapter_<N-1>`, and a re-upload can publish the same number twice
 (`Chapter 144` and `Chapter 144.0` are *different chapters*, both numbered 144.0). The site also

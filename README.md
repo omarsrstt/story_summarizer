@@ -165,6 +165,15 @@ anything can summarize them. `src/comic_reader.py` does only that, writing
 `novels/<slug>/chapter_NNNN.txt` — the exact layout `summarize.py` already looks for — so recap,
 `--group-size`, `--digest` and `--all` then work unchanged.
 
+The download step needs the site configured once, the same way the novel scraper does:
+
+```bash
+cp src/comic_site.example.json src/comic_site.json   # then fill in the two fields
+```
+
+`src/comic_site.json` is gitignored; everything else the comic pipeline needs is tracked in
+`src/comic_config.json` (glossary, tile geometry, output dirs).
+
 ```bash
 uv sync --extra comic --extra scraper
 uv run python src/comic_scraper.py --slug my-comic-series -n TBATE -c 1-5
@@ -285,12 +294,14 @@ labels* (`-c 175.1`), because those are what you read on the site. `summarize.py
 error naming the label it could not find; when the selection is a bare number it also suggests
 `--ordinals`. Note that `-c 144` and `-c 144.0` select **different chapters**.
 
-Only the host in `comic_config.json`'s `comic_site_host` and its subdomains are fetched, over
+Only the host in `comic_site.json`'s `comic_site_host` and its subdomains are fetched, over
 HTTP(S) only; the pages inject obfuscated scripts that redirect to ad hosts, so off-site image URLs
 are refused and no JavaScript is ever executed. `comic_series_url` holds the series URL template,
-so the site's address lives in one place rather than in the code. The host is read from that file
-once per run and falls back to the built-in default if the file is missing or malformed — a config
-typo makes the check permissive of nothing, but it never raises mid-download.
+so the site's address lives in one place rather than in the code. That file is gitignored, exactly
+like `scraper_config.json`: copy `src/comic_site.example.json` to `src/comic_site.json` and fill it
+in. The downloader refuses to start without it; the host is read once per run and falls back to a
+placeholder that matches nothing if the file is missing or malformed, so a config typo makes the
+check permissive of nothing but never raises mid-download.
 
 The download exits non-zero if any chapter failed or ends with zero pages on disk, and the exit
 code reports what is *on disk*, not what this run fetched — so a fully resumed run is a success.
@@ -322,7 +333,8 @@ Two OCR defects are corrected, since both visibly corrupt a transcript:
 Proper nouns are the limit of what a dictionary can infer: nothing in the text distinguishes
 `sap in` from `block him from`. `src/comic_config.json` therefore carries a per-series `glossary`
 of names and story terms; add to it whenever a recap mangles a name. The same file holds the tile
-geometry.
+geometry. It is tracked and holds nothing site-specific — the site's address lives in the
+gitignored `src/comic_site.json` instead.
 
 Filtering uses the segmenter's own 126k-word list rather than length guesses, which on a real
 chapter kept 287 of 294 blocks and dropped only page furniture (`213.`, `+`, `/`, `7`). A rare

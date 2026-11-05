@@ -14,8 +14,9 @@ What it reuses from the novel scraper, and why each one matters:
 * ``scraper_fast._with_retries`` / ``post_transport`` -- the ``curl_cffi`` TLS
   impersonation the site's bot check requires, plus timeout/5xx retries and 429
   backoff. There is one retry policy for the whole project, not one per verb.
-* ``comic_reader.load_config`` -- the same ``comic_config.json`` the reading
-  stage uses, so the comics directory cannot disagree between the two. Imported
+* ``comic_reader.load_config`` -- the same ``comic_config.json`` (plus the local
+  ``comic_site.json``) the reading stage uses, so the comics directory cannot
+  disagree between the two. Imported
   inside the function, not at module level: the reader pulls in the OCR extra's
   numpy/wordninja, and a download-only install must not need them to import this.
   The same deferral covers ``comic_reader.page_filename`` and the page extension
@@ -74,11 +75,14 @@ from scraper_parse import looks_like_challenge
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
-#: Where a series lives, keyed by slug. Overridable via ``comic_series_url`` so
-#: the site can move without editing code.
+#: Where a series lives, keyed by slug. Only reached when ``comic_site.json``
+#: does not supply ``comic_series_url``; the placeholder is reserved and points
+#: at nothing, so an unconfigured run fails instead of fetching from a guess.
 DEFAULT_SERIES_URL = "https://comic-site.test/manga/{slug}/"
 
-#: The host page images may come from. Overridable via ``comic_site_host``.
+#: The host page images may come from, when the config does not say. Also a
+#: placeholder: it matches no real image URL, so an unconfigured run refuses
+#: everything rather than pulling from an unexpected site.
 DEFAULT_SITE_HOST = "comic-site.test"
 
 #: The resolved site host, read from the config once per process.
@@ -126,6 +130,10 @@ def site_host() -> str:
     than raising: this answers a yes/no question about a URL, and a config typo
     turning into a ``JSONDecodeError`` from inside ``page_urls`` would surface as
     a traceback in a caller that only expects page URLs back.
+
+    The fallback is a placeholder host, so it matches nothing real -- an
+    unconfigured run refuses every image instead of fetching from anywhere. That
+    is the safe direction for a check that decides whether to fetch.
 
     The cache is a module global read *here*, so a test can reset it with
     ``monkeypatch.setattr(comic_scraper, "_SITE_HOST", None)``.
@@ -1135,7 +1143,12 @@ class Setup:
 
 
 def series_url_for(slug: str, config: dict | None = None) -> str:
-    """The series URL for ``slug``, from ``comic_series_url`` in the config."""
+    """The series URL for ``slug``, from ``comic_series_url`` in the config.
+
+    The template lives in the gitignored ``comic_site.json``; ``prepare`` refuses
+    to start without it, so the placeholder default is only ever reached by a
+    direct call that is not about to touch the network.
+    """
 
     if config is None:
         config = load_config()
@@ -1252,6 +1265,15 @@ def prepare(args) -> Setup:
     """
 
     config = load_config()
+    # The site is the one thing that deliberately is not in the tracked config.
+    # Without this check a fresh clone would fetch the placeholder host and
+    # report a network failure, which reads as "the site is down" rather than
+    # "you have not configured a site".
+    if not config.get("comic_series_url"):
+        raise ScrapeError(
+            "no comic site is configured: copy src/comic_site.example.json to "
+            "src/comic_site.json and fill in comic_series_url and comic_site_host"
+        )
     series_url = series_url_for(args.slug, config)
     out_dir = REPO_ROOT / config.get("comics_dir", "comics") / args.name
     manifest_path = out_dir / "chapters.json"

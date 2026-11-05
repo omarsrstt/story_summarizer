@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Local site settings for the comic download stage -- copy this file to",
+    "src/comic_site.json and fill in the real site.",
+    "",
+    "This example is tracked; comic_site.json is gitignored, exactly like",
+    "scraper_config.json. Keep it that way: the tracked half of the comic's",
+    "settings (comic_config.json) must never name a real site.",
+    "",
+    "comic_series_url: the series page for a slug, with {slug} filled in from",
+    "--slug (or --name). The chapter list is read from <series>/ajax/chapters/,",
+    "so this is the one place the site's URL shape is written down.",
+    "",
+    "comic_site_host: the only host page images may come from, including its",
+    "subdomains. The pages inject scripts that redirect to ad hosts, so any",
+    "other image URL is refused rather than followed.",
+    "",
+    "The placeholder below (comic-site.test) is a reserved test suffix and is",
+    "not a real site. The downloader refuses to run until this is filled in.",
+    "Do not use example.com here: the host check accepts subdomains of the",
+    "configured host, so it would also accept evil.example.com."
+  ],
+
+  "comic_series_url": "https://comic-site.test/manga/{slug}/",
+  "comic_site_host": "comic-site.test"
+}

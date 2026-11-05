@@ -879,6 +879,10 @@ git commit -m "feat(comic): settle duplicates before writing, resume without ren
 **Files:**
 - Modify: `src/comic_scraper.py` (`main`, argument parsing)
 - Modify: `src/comic_config.json` (add `comic_series_url` and `comic_site_host`)
+  > **Superseded:** the site keys do **not** belong in the tracked config. They live in the
+  > gitignored `src/comic_site.json`, with `src/comic_site.example.json` tracked; the tracked
+  > `comic_config.json` must never name a site. See `AGENTS.md` → "Config: the site is never
+  > tracked". This was found only after the work shipped, when the repo turned out to be public.
 - Modify: `README.md` (the "Downloading the pages" section)
 - Test: `tests/test_comic_selection.py` (create)
 
@@ -977,7 +981,12 @@ Expected: FAIL with `ImportError: cannot import name 'parse_label_selection'`
 
 `main` loads the config, resolves the series URL from `--slug` and `comic_series_url`, fetches the list, `assign`s and saves the manifest, prints the plan, then calls `run`. `--dry-run` scans and prints without writing pages.
 
-`comic_config.json` gains `"comic_series_url": "https://comic-site.test/manga/{slug}/"` and `"comic_site_host": "comic-site.test"`, and `safe_image_url` reads the host from the config instead of hardcoding it.
+~~`comic_config.json` gains `"comic_series_url": "https://comic-site.test/manga/{slug}/"` and `"comic_site_host": "comic-site.test"`, and `safe_image_url` reads the host from the config instead of hardcoding it.~~
+
+**Superseded:** the site keys went to the gitignored `src/comic_site.json` instead, merged over the
+tracked `comic_config.json` by `comic_reader.load_config`. `safe_image_url` still reads the host
+from the config rather than hardcoding it, which remains the point; only *which* file holds it
+changed. See `AGENTS.md` → "Config: the site is never tracked".
 
 README replaces the walk-based description with: the one-request chapter list, the manifest, ordinal filenames, the archive step for legacy trees, the duplicate rule, and the fact that `-c` takes site labels while `summarize.py -c` takes ordinals.
 

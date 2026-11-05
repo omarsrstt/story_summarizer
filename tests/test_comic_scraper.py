@@ -5,6 +5,26 @@ from comic_manifest import ChapterRecord
 
 SERIES = "https://comic-site.test/manga/the-beginning-after-the-end-series/"
 
+
+@pytest.fixture(autouse=True)
+def _fixture_site(monkeypatch):
+    """Pin the site to the fixture host for every test in this module.
+
+    The real site now lives in the developer's gitignored ``comic_site.json``, so
+    a test that read the config would pass or fail depending on whose machine ran
+    it. Tests that assert config behaviour still override this themselves.
+    """
+
+    monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(
+        cs,
+        "load_config",
+        lambda path=None: {
+            "comic_site_host": "comic-site.test",
+            "comic_series_url": "https://comic-site.test/manga/{slug}/",
+        },
+    )
+
 # A trimmed copy of real output: the lazy-load pattern is what matters -- `src`
 # is a placeholder and the real address lives in `data-src`.
 CHAPTER_HTML = """
@@ -1002,3 +1022,20 @@ def test_a_half_typed_label_is_refused_before_the_chapter_list_is_fetched(monkey
     monkeypatch.setattr(cs, "post_transport", boom)
     with pytest.raises(SystemExit):
         cs.main(["-n", "T", "-c", "chapter"])
+
+
+def test_an_unconfigured_site_is_refused_before_any_request(monkeypatch, tmp_path):
+    # A fresh clone has comic_config.json but no comic_site.json. Fetching the
+    # placeholder host would fail as a network error, which reads as "the site
+    # is down" rather than "you have not configured a site" -- so refuse here,
+    # and prove no request went out.
+    def boom(*args, **kwargs):
+        raise AssertionError("nothing may be fetched without a configured site")
+
+    monkeypatch.setattr(cs, "post_transport", boom)
+    monkeypatch.setattr(cs, "load_config", lambda path=None: {"comics_dir": str(tmp_path)})
+    args = cs.parse_args(["-n", "T", "-c", "1"])
+
+    with pytest.raises(cs.ScrapeError, match="comic_site.example.json"):
+        cs.prepare(args)
+

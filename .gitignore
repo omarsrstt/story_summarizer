@@ -184,6 +184,10 @@ transcripts/
 # Local scraper config (holds real site URLs) -- see scraper_config.example.json
 src/scraper_config.json
 
+# Local comic site config (which site a series lives on) -- see
+# comic_site.example.json. The tracked comic_config.json must stay publishable.
+src/comic_site.json
+
 # Fast scraper's cached Cloudflare cookie + chapter list (site-specific, local only)
 .scraper_cache/
 

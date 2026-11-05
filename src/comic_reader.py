@@ -60,6 +60,14 @@ def page_filename(ordinal: int, page: int, ext: str) -> str:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(__file__).resolve().parent / "comic_config.json"
 
+#: The local half of the comic settings: which site a series lives on.
+#:
+#: Split out from ``comic_config.json`` for the same reason the novel scraper's
+#: ``scraper_config.json`` is gitignored -- the tracked config says how to read a
+#: page, this one says where to find it. Nothing else lives here, so the tracked
+#: file stays publishable and the glossary stays versioned.
+SITE_CONFIG_PATH = Path(__file__).resolve().parent / "comic_site.json"
+
 #: Comics are read into their own namespace. A comic and a novel can share a
 #: name ("TBATE" is both a comic here and a plausible novel title), and both
 #: resolve to ``<root>/<slug>``, so an unprefixed slug would let one overwrite
@@ -84,12 +92,36 @@ def comic_slug(series: str) -> str:
 
 
 def load_config(path: Path | None = None) -> dict:
-    """Read ``comic_config.json``; missing keys fall back to sensible defaults."""
+    """Read ``comic_config.json``, with the local site settings merged in.
+
+    The tracked config holds everything that is the same for every user (glossary,
+    tile geometry, output dirs); ``comic_site.json`` holds the two keys that name
+    the site and is gitignored, mirroring ``scraper_config.json``.
+
+    The merge is shallow and the site file wins, so an existing single-file config
+    that still carries ``comic_series_url``/``comic_site_host`` keeps working --
+    the switch to two files needs no migration.
+
+    A missing site file is not an error: a reader-only run needs no host, and the
+    scraper reports a missing host when it actually tries to fetch. An unreadable
+    or malformed *either* file is still an error here -- silently dropping the
+    glossary over a typo would degrade every transcript without a word.
+    """
 
     config_path = path or CONFIG_PATH
-    if not config_path.is_file():
+    config = _read_json(config_path)
+    site_path = config_path.with_name(SITE_CONFIG_PATH.name)
+    if site_path.is_file():
+        config.update(_read_json(site_path))
+    return config
+
+
+def _read_json(path: Path) -> dict:
+    """The JSON object at ``path``, or ``{}`` when the file is absent."""
+
+    if not path.is_file():
         return {}
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def group_chapters(image_dir: Path) -> dict[int, list[Path]]:
