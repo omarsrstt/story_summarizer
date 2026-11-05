@@ -123,7 +123,8 @@ tells you what the panel probably said.
 
 Three scripts, each writing the next stage's input:
 
-1. `src/comic_scraper.py` — downloads page images to `comics/<name>/c_<ordinal>_<page>.<ext>`.
+1. `src/comic_scraper.py` — downloads page images to
+   `comics/<name>/c_<ordinal>/c_<ordinal>_<page>.<ext>` (one folder per chapter).
    Also writes `comics/<name>/chapters.json`, the **authoritative manifest**.
 2. `src/comic_reader.py` — OCRs the pages into `novels/comic-<name>/chapter_NNNNN.txt`, one file
    per chapter, using the same `chapter_%05d` convention the novel scraper uses.

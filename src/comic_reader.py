@@ -38,6 +38,22 @@ CHAPTER_PATTERNS = (
 
 PAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
+#: A folder that holds one chapter's pages, e.g. ``c_000147``.
+CHAPTER_DIR_PATTERN = re.compile(r"^c_\d{6}$", re.IGNORECASE)
+
+
+def chapter_dir(out_dir: Path, ordinal: int) -> Path:
+    """The folder holding chapter ``ordinal``'s pages: ``<out_dir>/c_000147``.
+
+    Pages live in one folder per chapter because a full series is ~15,000 files:
+    one directory that size is still legal but unusable to browse, and
+    re-downloading a single chapter means picking its files out of the pile. The
+    file *names* are unchanged, so a page still says which chapter it belongs to
+    if it is ever copied out of its folder.
+    """
+
+    return Path(out_dir) / f"c_{ordinal:06d}"
+
 
 def page_filename(ordinal: int, page: int, ext: str) -> str:
     """The file name for one page of chapter ``ordinal``.
@@ -154,18 +170,30 @@ def group_chapters(image_dir: Path) -> dict[int, list[Path]]:
     Two layouts occur in practice and both must be supported: one image per
     reader page (``c_1_7.jpg``), and a whole chapter stitched into a single
     continuous scroll (``c_0_1.jpg``).
+
+    Two *directories* are supported too: the current ``c_000147/`` chapter
+    folders and the older flat tree where every page of the series sat in one
+    directory. Reading both means a migration cannot strand a chapter -- a tree
+    that is half foldered and half flat reads completely either way.
     """
 
     chapters: dict[int, list[tuple[int, Path]]] = {}
-    for path in sorted(image_dir.iterdir()):
-        if not path.is_file():
-            continue
-        for pattern in CHAPTER_PATTERNS:
-            match = pattern.match(path.name)
-            if match:
-                chapter, page = int(match.group(1)), int(match.group(2))
-                chapters.setdefault(chapter, []).append((page, path))
-                break
+
+    def collect(directory: Path) -> None:
+        for path in sorted(directory.iterdir()):
+            if not path.is_file():
+                continue
+            for pattern in CHAPTER_PATTERNS:
+                match = pattern.match(path.name)
+                if match:
+                    chapter, page = int(match.group(1)), int(match.group(2))
+                    chapters.setdefault(chapter, []).append((page, path))
+                    break
+
+    collect(Path(image_dir))
+    for entry in sorted(Path(image_dir).iterdir()):
+        if entry.is_dir() and CHAPTER_DIR_PATTERN.match(entry.name):
+            collect(entry)
 
     if not chapters:
         raise SystemExit(f"No comic pages found in {image_dir}")

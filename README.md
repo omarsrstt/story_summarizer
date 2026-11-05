@@ -248,6 +248,13 @@ exists to prevent.
 can publish the same number twice (`Chapter 144` and `Chapter 144.0` are two chapters, both 144.0),
 so the number cannot identify a chapter. The ordinal can.
 
+**Each chapter gets its own folder.** Pages live at
+`comics/<name>/c_000147/c_000147_007.jpg` — one directory per chapter, filename unchanged. A full
+series is roughly 15,000 files, and one flat directory that size is legal but painful to browse and
+impossible to re-download a single chapter from. Keeping the full filename means a page copied out
+of its folder still says which chapter it belongs to. `comic_reader` reads both this layout and the
+older flat tree, so an interrupted migration cannot strand a chapter.
+
 **Legacy trees must be archived first.** Pages written before ordinals existed look like
 `c_7_1.jpg` — an unpadded chapter number. They match the same reader pattern as the new names, so
 reading them side by side would merge two chapters' pages (chapter 7's old pages and its new ones

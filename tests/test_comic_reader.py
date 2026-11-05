@@ -73,6 +73,54 @@ def test_unrelated_files_are_ignored(tmp_path):
     assert len(chapters[1]) == 1
 
 
+# -- one folder per chapter ------------------------------------------------
+
+
+def test_pages_in_a_chapter_folder_are_grouped(tmp_path):
+    folder = tmp_path / "c_000147"
+    folder.mkdir()
+    _touch(folder, "c_000147_001.jpg")
+    _touch(folder, "c_000147_002.jpg")
+
+    chapters = group_chapters(tmp_path)
+
+    assert list(chapters) == [147]
+    assert [p.name for p in chapters[147]] == [
+        "c_000147_001.jpg",
+        "c_000147_002.jpg",
+    ]
+
+
+def test_a_half_migrated_tree_reads_completely(tmp_path):
+    # The migration moves chapters into folders one at a time, so an interrupted
+    # move leaves both layouts at once. Every chapter must still be found: losing
+    # one here would look like a chapter that was never downloaded.
+    _touch(tmp_path, "c_000001_001.jpg")          # still flat (not yet moved)
+    folder = tmp_path / "c_000002"
+    folder.mkdir()
+    _touch(folder, "c_000002_001.jpg")            # already foldered
+
+    chapters = group_chapters(tmp_path)
+
+    assert sorted(chapters) == [1, 2]
+    assert len(chapters[1]) == 1
+    assert len(chapters[2]) == 1
+
+
+def test_a_folder_that_is_not_a_chapter_is_ignored(tmp_path):
+    # ``unused/`` and anything else living beside the chapter folders must not
+    # be mistaken for one, or archived pages would reappear in the series.
+    unused = tmp_path / "unused"
+    unused.mkdir()
+    _touch(unused, "c_000009_001.jpg")
+    _touch(tmp_path, "c_000001_001.jpg")
+
+    chapters = group_chapters(tmp_path)
+
+    assert list(chapters) == [1]
+    assert len(chapters[1]) == 1
+
+
 def test_an_empty_directory_is_an_error(tmp_path):
     with pytest.raises(SystemExit):
         group_chapters(tmp_path)

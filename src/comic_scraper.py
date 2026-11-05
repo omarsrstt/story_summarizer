@@ -609,17 +609,25 @@ def pages_on_disk(out_dir: Path, ordinal: int) -> int:
     merge them.
     """
 
-    from comic_reader import PAGE_EXTENSIONS  # deferred: see module docstring
+    from comic_reader import PAGE_EXTENSIONS, chapter_dir  # deferred: see docstring
 
     out_dir = Path(out_dir)
     if not out_dir.is_dir():
         return 0
     prefix = f"c_{ordinal:06d}_"
-    return sum(
-        1
-        for path in out_dir.glob("c_*")
-        if path.name.startswith(prefix) and path.suffix.lower() in PAGE_EXTENSIONS
-    )
+    total = 0
+    # The current layout is one folder per chapter; the older flat tree kept
+    # every page in the series directory. Counting both means a resumed run over
+    # a half-migrated tree still reports "on disk" honestly.
+    for directory in (out_dir, chapter_dir(out_dir, ordinal)):
+        if not directory.is_dir():
+            continue
+        total += sum(
+            1
+            for path in directory.glob("c_*")
+            if path.name.startswith(prefix) and path.suffix.lower() in PAGE_EXTENSIONS
+        )
+    return total
 
 
 def download_chapter(
@@ -643,7 +651,7 @@ def download_chapter(
     complete chapter is exactly how a download gets truncated silently.
     """
 
-    from comic_reader import page_filename  # deferred: see module docstring
+    from comic_reader import chapter_dir, page_filename  # deferred: see docstring
     from comic_images import looks_like_image
 
     out_dir = Path(out_dir)
@@ -665,7 +673,8 @@ def download_chapter(
     # short.
     record.pages = len(urls)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    page_dir = chapter_dir(out_dir, record.ordinal)
+    page_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
     failed = 0
     for index, image_url in enumerate(urls, start=1):
@@ -677,7 +686,7 @@ def download_chapter(
             continue
 
         name = page_filename(record.ordinal, index, ext)
-        path = out_dir / name
+        path = page_dir / name
         if path.exists() and not overwrite:
             continue
 
@@ -959,18 +968,29 @@ def has_legacy_files(out_dir: Path) -> bool:
     The test is the width of the chapter digits, not the presence of the file:
     six digits is the shape this module writes, anything else is the old one. A
     missing directory has no files, so it is not legacy.
+
+    Both levels are scanned. Pages now live in ``c_000147/`` folders, so a legacy
+    page copied into a folder would be invisible to a top-level-only check --
+    and that check is what stops two chapters being merged into one.
     """
 
-    from comic_reader import CHAPTER_PATTERNS  # deferred: see module docstring
+    from comic_reader import CHAPTER_DIR_PATTERN, CHAPTER_PATTERNS  # deferred
 
     out_dir = Path(out_dir)
     if not out_dir.is_dir():
         return False
     pattern = CHAPTER_PATTERNS[0]
-    for path in out_dir.iterdir():
-        match = pattern.match(path.name)
-        if match and len(match.group(1)) != 6:
-            return True
+    directories = [out_dir]
+    directories += [
+        entry
+        for entry in out_dir.iterdir()
+        if entry.is_dir() and CHAPTER_DIR_PATTERN.match(entry.name)
+    ]
+    for directory in directories:
+        for path in directory.iterdir():
+            match = pattern.match(path.name)
+            if match and len(match.group(1)) != 6:
+                return True
     return False
 
 

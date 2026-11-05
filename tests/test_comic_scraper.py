@@ -267,7 +267,9 @@ def test_pages_are_saved_under_the_ordinal(tmp_path, monkeypatch):
 
     result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
 
-    assert [p.name for p in tmp_path.glob("*.jpg")] == ["c_000005_001.jpg"]
+    # One folder per chapter, and the page name still carries the ordinal so a
+    # file copied out of the folder still identifies itself.
+    assert [p.name for p in (tmp_path / "c_000005").glob("*.jpg")] == ["c_000005_001.jpg"]
     assert (result.saved, result.failed, result.on_disk) == (1, 0, 1)
 
 
@@ -302,8 +304,12 @@ def test_an_interrupted_write_leaves_no_file_that_counts_as_a_page(tmp_path, mon
     # The partial bytes may survive under the temporary name. What must not
     # survive is a file wearing a page's name -- that is the one the existence
     # check and the reader would both accept.
-    assert [p.name for p in tmp_path.iterdir() if p.suffix in {".jpg", ".jpeg", ".png", ".webp"}] == []
-    assert list(tmp_path.glob("*.part"))
+    page_dir = tmp_path / "c_000009"
+    assert [
+        p.name for p in page_dir.iterdir()
+        if p.suffix in {".jpg", ".jpeg", ".png", ".webp"}
+    ] == []
+    assert list(page_dir.glob("*.part"))
 
 
 def test_a_page_that_saves_nothing_is_reported_as_failed(tmp_path, monkeypatch):
@@ -316,7 +322,7 @@ def test_a_page_that_saves_nothing_is_reported_as_failed(tmp_path, monkeypatch):
     result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
 
     assert (result.saved, result.failed, result.on_disk) == (0, 1, 0)
-    assert list(tmp_path.glob("*.jpg")) == []
+    assert list(tmp_path.rglob("*.jpg")) == []
 
 
 def test_an_html_error_page_is_never_saved_as_an_image(tmp_path, monkeypatch):
@@ -329,7 +335,7 @@ def test_an_html_error_page_is_never_saved_as_an_image(tmp_path, monkeypatch):
     result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
 
     assert result.saved == 0 and result.failed == 1
-    assert list(tmp_path.glob("*.jpg")) == []
+    assert list(tmp_path.rglob("*.jpg")) == []
 
 
 def test_existing_pages_are_not_downloaded_again(tmp_path, monkeypatch):
@@ -337,7 +343,8 @@ def test_existing_pages_are_not_downloaded_again(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
     seen = []
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (seen.append(u), (200, JPEG))[1])
-    (tmp_path / "c_000005_001.jpg").write_bytes(JPEG)
+    (tmp_path / "c_000005").mkdir()
+    (tmp_path / "c_000005" / "c_000005_001.jpg").write_bytes(JPEG)
     record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
 
     result = cs.download_chapter(SERIES, record, tmp_path, delay=0)
@@ -351,7 +358,8 @@ def test_overwrite_refetches_what_is_already_there(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, _page_html(page)))
     seen = []
     monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (seen.append(u), (200, JPEG))[1])
-    (tmp_path / "c_000005_001.jpg").write_bytes(b"old")
+    (tmp_path / "c_000005").mkdir()
+    (tmp_path / "c_000005" / "c_000005_001.jpg").write_bytes(b"old")
     record = ChapterRecord(ordinal=5, slug="chapter-5", label="Chapter 5", number=5.0)
 
     result = cs.download_chapter(SERIES, record, tmp_path, overwrite=True, delay=0)
@@ -782,6 +790,17 @@ def test_a_legacy_page_file_blocks_the_run(tmp_path, capsys):
 def test_ordinal_named_files_are_not_legacy(tmp_path):
     (tmp_path / "c_000001_001.jpg").write_bytes(JPEG)
     assert not cs.has_legacy_files(tmp_path)
+
+
+def test_a_legacy_page_inside_a_chapter_folder_is_still_legacy(tmp_path):
+    # Pages now live in c_000147/ folders. A legacy page sitting inside one would
+    # be invisible to a top-level-only check, and that check is what stops two
+    # chapters being merged into one -- so it must scan one level down too.
+    folder = tmp_path / "c_000147"
+    folder.mkdir()
+    (folder / "c_7_1.jpg").write_bytes(JPEG)
+
+    assert cs.has_legacy_files(tmp_path)
 
 
 def test_a_missing_directory_has_no_legacy_files(tmp_path):
