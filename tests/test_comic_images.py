@@ -32,14 +32,28 @@ def _quad(top_left, top_right, bottom_left, bottom_right) -> bytes:
     return _png(np.vstack([top, bottom]))
 
 
+def _rescaled(payload: bytes, size: int) -> bytes:
+    """The same picture at a different resolution, as a re-upload would be."""
+    buffer = io.BytesIO()
+    with Image.open(io.BytesIO(payload)) as image:
+        image.resize((size, size), Image.NEAREST).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 PAGE_A = _quad(255, 0, 0, 255)
 PAGE_B = _quad(0, 255, 255, 0)
 PAGE_C = _quad(255, 255, 0, 0)
 
 
 def test_the_same_picture_hashes_identically():
+    # Deliberately the same *file bytes* re-hashed, not a value compared with
+    # itself: this pins that ``average_hash`` is deterministic, so a rescan of
+    # an unchanged page cannot make a duplicate look like a new chapter.
     payload = _png(np.full((32, 32), 200))
-    assert hamming(average_hash(payload), average_hash(payload)) == 0
+    first = average_hash(payload)
+    second = average_hash(payload)
+    assert first == second
+    assert hamming(first, second) == 0
 
 
 def test_a_different_picture_hashes_further_than_the_threshold():
@@ -49,9 +63,15 @@ def test_a_different_picture_hashes_further_than_the_threshold():
 
 
 def test_a_rescale_of_the_same_picture_still_matches():
-    plain = average_hash(_png(np.full((32, 32), 200)))
-    bigger = average_hash(_png(np.full((128, 128), 200)))
+    # Structured quadrants, not flat fills: a flat fill sits below its own mean
+    # and hashes to all-zeros at every size, so it would "match" under any
+    # implementation and prove nothing about the resize path.
+    plain = average_hash(_quad(255, 0, 0, 255))
+    bigger = average_hash(_rescaled(_quad(255, 0, 0, 255), 128))
     assert hamming(plain, bigger) <= DUPLICATE_DISTANCE
+
+    other = average_hash(_quad(0, 255, 255, 0))
+    assert hamming(plain, other) > DUPLICATE_DISTANCE
 
 
 def test_an_html_error_page_is_not_an_image():

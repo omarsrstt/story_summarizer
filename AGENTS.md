@@ -218,6 +218,8 @@ them.
 Unit tests cannot catch the failures that matter most here. Every serious defect in the comic
 scraper was found by a **live** run on a handful of chapters, not by the suite: the page-1
 fingerprint was validated by tests and still dropped a real chapter, and a Cloudflare-shaped hole
-looked identical to EOF. So after touching the scraper, run one small live range
-(`-c 175-175.2` covers fractional labels, a shared opener and a duplicate) and read the output.
+looked identical to EOF. So after touching the scraper, run a small live range and read the output.
+Two runs are worth the requests: `-c 175-175.2` covers fractional labels, a shared opener and the
+`175.2` regression, and `-c "144,144.0"` covers true-duplicate detection (the pair is *outside*
+the first range, so that run says nothing about duplicates). Remember to quote the comma.
 

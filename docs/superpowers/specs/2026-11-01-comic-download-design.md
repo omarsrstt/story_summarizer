@@ -89,8 +89,12 @@ All numbers come from probing the live series list (300 entries) and page HTML.
 
 Replace the next-link walk with a single AJAX fetch
 (`POST <series>ajax/chapters/` with `X-Requested-With: XMLHttpRequest`), parsed with
-BeautifulSoup (the same parser `scraper_parse`/`scraper_session` already use). The walk
-stays only as a fallback if the AJAX list comes back empty.
+BeautifulSoup (the same parser `scraper_parse`/`scraper_session` already use). ~~The walk
+stays only as a fallback if the AJAX list comes back empty.~~ **Built differently, and
+deliberately: there is no fallback.** An empty or unparseable list raises instead
+(`src/comic_scraper.py:fetch_chapter_list`). A walk that silently substitutes for a failed
+list is the failure mode being removed — it cannot tell "the series ended" from "the request
+was blocked", so it would report a truncated download as complete.
 
 No browser and no harvested cookies are needed for this (measured), so the download
 stage keeps the simple strategy the current script uses: plain `curl_cffi` through
@@ -136,11 +140,13 @@ preceding one and is flagged in the manifest, so a gap in ordinals is possible a
 visible rather than silent.
 
 **Duplicates are recorded and skipped, keeping their slot.** A chapter detected as a
-re-upload gets an ordinal, `pages: 0`, and `duplicate_of: <canonical ordinal>`; no page
-files are written. Ordinals therefore stay dense over the site's list, and reading
-shows a deliberate one-chapter jump rather than a numbering surprise. When a pair
-collides, the chapter **with more pages wins** (the re-upload can lose a page: `144` has
-81, `144.0` has 80), and the loser is the one marked `duplicate_of`.
+re-upload gets an ordinal and `duplicate_of: <canonical ordinal>`; no page files are written.
+~~`pages: 0`~~ — built differently: the record keeps the page count the scan measured, because
+that number is evidence about the site and blanking it would destroy the only record of what the
+duplicate was. Ordinals therefore stay dense over the site's list, and reading shows a deliberate
+one-chapter jump rather than a numbering surprise. When a pair collides, the chapter **with more
+pages wins** (the re-upload can lose a page: `144` has 81, `144.0` has 80), and the loser is the
+one marked `duplicate_of`.
 
 
 ### 7.3 Filenames
@@ -219,9 +225,13 @@ See `src/comic_images.py:chapter_fingerprint` and `src/comic_scraper.py:_is_dupl
 The methodological lesson, since this file is the record: measuring whether *distinct* things
 differ says nothing about whether *duplicates* match. Both must be measured.
 
-The download stage already needs the `comic` extra for this, so it is declared as
-requiring `uv sync --extra comic --extra scraper` and fails with that exact message
-rather than a bare import error.
+The download stage needs both extras for the *scan* only, because the hash lives in
+`comic_images` (PIL + numpy). ~~so it is declared as requiring `uv sync --extra comic --extra
+scraper` and fails with that exact message rather than a bare import error.~~ Built differently:
+the imports are deferred into the functions that hash, so a `--extra scraper`-only install can
+still download without the OCR extra, and the reader is what states the `uv sync` command
+(`src/comic_reader.py`). Keeping the download path importable on the smaller install was worth
+more than an early, friendly error.
 
 ## 8. What is left to the builder
 

@@ -269,9 +269,11 @@ A re-upload can start at a different opener, so page 1 *misses* real duplicates.
 chapters can share a cover, so page 1 *manufactures* them — the first version of this did exactly
 that and silently skipped `175.2`, four real pages, which is the failure this whole stage exists to
 prevent. Pages 2 onwards separate the two cases completely. A side effect worth knowing: a chapter
-too short to have three pages hashable gets a shorter fingerprint, and shorter never matches
-longer. That is deliberate. A false duplicate drops a real chapter; a missed one only costs
-bandwidth, so every ambiguous case falls on the cheap side.
+too short to have three pages hashable gets a shorter fingerprint, and a shorter one never matches
+a longer one. A **one-page** fingerprint is not even offered as evidence — a chapter needs two
+hashed pages before it can be called a duplicate at all. That is deliberate. A false duplicate
+drops a real chapter; a missed one only costs bandwidth, so every ambiguous case falls on the
+cheap side.
 
 **On Windows, quote a comma-separated `-c`.** PowerShell treats `,` as its own array separator, so
 `-c 144,144.0` arrives as two arguments and argparse keeps only `144` — it downloads half your

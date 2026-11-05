@@ -96,6 +96,12 @@ IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 #: Spellings of the same format, folded so one page has one name.
 _EXTENSION_ALIASES = {".jpeg": ".jpg"}
 
+#: How many page hashes a fingerprint needs before it can call anything a
+#: duplicate. One 64-hex hash carries far less evidence than three, and a
+#: chapter is only a duplicate candidate when at least two pages agree; see
+#: ``_is_duplicate`` for why the short case must fall on the cheap direction.
+_MIN_FINGERPRINT_HASHES = 2
+
 
 class ScrapeError(Exception):
     """A refusal that retrying will not fix."""
@@ -830,20 +836,29 @@ def _is_duplicate(a: str, b: str) -> bool:
     This is also what makes an old manifest safe **today**, but only because of
     the scan, not because of this length check. An old manifest holds
     64-character page-1 hashes from before this change. A 64-character value
-    passes the length guard against any other 64-character value -- another
-    legacy hash, or a current one-page fingerprint from a 2-page chapter
-    (``len // 64`` = 1) -- so a legacy hash can still be compared, and two
-    distinct chapters sharing a cover could be grouped on the strength of it,
-    which is the very bug this module was changed to fix. That route is closed
-    by ``execute``: it rescans every chapter in the plan and clears the hash of
-    any record whose scan failed, so no stale value reaches here. If that
-    rescan-and-clear step were ever removed, the leftover risk is a legacy
-    64-character hash being compared against another 64-character value.
+    passes the length guard against any other 64-character value, so a legacy
+    hash can still be compared, and two distinct chapters sharing a cover could
+    be grouped on the strength of it, which is the very bug this module was
+    changed to fix. ``_MIN_FINGERPRINT_HASHES`` closes that at the source: a
+    fingerprint of one hash is not evidence enough to call anything a duplicate,
+    which also covers the current one-hash case (a 2-page chapter hashes only
+    page 2). ``execute`` additionally rescans every chapter in the plan and
+    clears the hash of any record whose scan failed, so no stale value reaches
+    here at all.
     """
 
     from comic_images import hamming
 
     if not a or not b or len(a) != len(b):
+        return False
+    # One page hash is 64 hex characters and compares at 10 bits out of 256:
+    # far weaker evidence than three pages at 30 out of 768. Two distinct
+    # chapters that share one page -- a credits strip, a chapter card -- would
+    # group on that alone and one would be silently dropped, which is the
+    # expensive direction. Requiring two hashes means a chapter needs a third
+    # page before it can be a candidate at all: the cost is a missed duplicate
+    # on a very short chapter (bandwidth), not a lost one.
+    if len(a) < _MIN_FINGERPRINT_HASHES * 64:
         return False
     return hamming(a, b) <= _duplicate_threshold(a)
 

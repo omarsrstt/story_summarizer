@@ -232,8 +232,6 @@ def test_an_unknown_or_missing_extension_is_refused(url):
 
 # -- downloading one chapter -----------------------------------------------
 
-JPEG = b"\xff\xd8\xff\xe0" + b"0" * 400
-
 
 def _page_html(*urls):
     return "".join(
@@ -556,22 +554,18 @@ def test_fingerprints_of_different_lengths_are_never_duplicates():
     assert one_page.duplicate_of is None
 
 
-def test_a_legacy_sixty_four_char_hash_only_compares_at_sixty_four_chars():
-    # Records the limitation rather than pretending it does not exist: a hash
-    # written by the old page-1 code is 64 characters, and the length guard in
-    # ``_is_duplicate`` is a length test, not a format test. So a legacy value
-    # is never compared against a current 192-character fingerprint -- but it IS
-    # compared against any other 64-character value, whether that is another
-    # legacy hash or a current one-page fingerprint from a 2-page chapter
-    # (``len // 64`` = 1). Two distinct chapters that share a cover could
-    # therefore still group if both carried a legacy hash.
+def test_a_single_hash_fingerprint_is_never_evidence_of_a_duplicate():
+    # A 64-character fingerprint is one page hash, compared at 10 bits out of
+    # 256. That is far weaker than three pages at 30 out of 768, and two
+    # distinct chapters sharing one page -- a credits strip, a chapter card --
+    # would group on it and one would be silently dropped. So a fingerprint
+    # needs at least ``_MIN_FINGERPRINT_HASHES`` pages before it can call
+    # anything a duplicate.
     #
-    # This is pinned deliberately, and the route is closed at the caller instead
-    # of here: ``execute`` rescans every chapter in the plan and clears the hash
-    # of any record whose scan failed, so no stale value reaches
-    # ``mark_duplicates``. Removing that rescan-and-clear would re-open it, and
-    # this test says so out loud rather than letting the comment claim a
-    # protection the code does not provide.
+    # This also closes the legacy route outright rather than relying on the
+    # caller: an old manifest's 64-character page-1 hashes cannot compare with
+    # anything, so a stale value cannot group two chapters even if the
+    # rescan-and-clear step in ``execute`` were ever removed.
     legacy = FINGERPRINT[:64]
     other_legacy = _flipped(legacy, 4)
     current = FINGERPRINT
@@ -579,9 +573,14 @@ def test_a_legacy_sixty_four_char_hash_only_compares_at_sixty_four_chars():
     # Different lengths never compare, legacy or not.
     assert not cs._is_duplicate(legacy, current)
 
-    # Two 64-character values within the one-page threshold of 10 bits DO
-    # compare, which is exactly the latent risk described above.
-    assert cs._is_duplicate(legacy, other_legacy)
+    # Two 64-character values well within the one-page threshold of 10 bits
+    # still do NOT compare: one page is not enough evidence.
+    assert not cs._is_duplicate(legacy, other_legacy)
+
+    # Two pages is the minimum that can match, and the threshold scales with it.
+    two = FINGERPRINT[:128]
+    assert cs._is_duplicate(two, _flipped(two, 15))
+    assert not cs._is_duplicate(two, _flipped(two, 25))
 
 
 def test_a_page_count_tie_is_won_by_the_lower_ordinal_whatever_the_list_order():
@@ -800,10 +799,67 @@ def test_a_fully_resumed_run_succeeds(tmp_path, monkeypatch):
 
 
 def test_the_manifest_is_written_after_each_chapter(tmp_path, monkeypatch):
-    monkeypatch.setattr(cs, "default_transport", lambda u, h, c: (200, "<html></html>"))
-    record = ChapterRecord(ordinal=1, slug="a", label="Chapter 1", number=1.0)
-    cs.run(SERIES, tmp_path, Manifest("T", SERIES, [record]), [record], delay=0)
-    assert (tmp_path / "chapters.json").is_file()
+    # Per-chapter persistence has to be proven against the alternative it is
+    # contrasted with -- once at the end -- so this kills the run on the second
+    # chapter and asserts the first chapter's record is already on disk with its
+    # scanned fields. A single-chapter plan cannot tell the two apart.
+    pages = {
+        "chapter-1": _page_html("https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"),
+        "chapter-2": _page_html("https://c4.comic-site.test/x/chapter_9/ch_9_1.jpg"),
+    }
+    calls = []
+
+    def page(url, headers, cookies):
+        if "ch_" in url:
+            return 200, PAGE_IMAGE
+        calls.append(url)
+        if len(calls) > 2:
+            raise KeyboardInterrupt("power loss")
+        return 200, pages["chapter-1" if "chapter-1" in url else "chapter-2"]
+
+    monkeypatch.setattr(cs, "default_transport", page)
+    monkeypatch.setattr(cs, "bytes_transport", lambda u, h, c: (200, PAGE_IMAGE))
+    first = ChapterRecord(ordinal=1, slug="chapter-1", label="Chapter 1", number=1.0)
+    second = ChapterRecord(ordinal=2, slug="chapter-2", label="Chapter 2", number=2.0)
+    manifest = Manifest("T", SERIES, [first, second])
+
+    try:
+        cs.run(SERIES, tmp_path, manifest, [first, second], delay=0)
+    except KeyboardInterrupt:
+        pass
+
+    saved = Manifest.from_dict(json.loads((tmp_path / "chapters.json").read_text("utf-8")))
+    # Chapter 1 finished before the kill, and its ordinal and page count are
+    # already durable -- that is the guarantee an interrupted run depends on.
+    assert [c.ordinal for c in saved.chapters] == [1, 2]
+    assert saved.chapters[0].pages == 1
+
+
+def test_a_partially_failed_chapter_fails_the_run_although_pages_are_on_disk(
+    tmp_path, monkeypatch, capsys
+):
+    # The honesty core: some pages saved is not success. A run that stopped
+    # counting per-page failures toward the exit code would report this chapter
+    # complete, which is the failure mode the whole stage exists to prevent.
+    pages = ["a.jpg", "b.webp"]
+    monkeypatch.setattr(
+        cs,
+        "default_transport",
+        lambda u, h, c: (200, _page_html(*(f"https://c4.comic-site.test/x/chapter_9/{n}" for n in pages))),
+    )
+    monkeypatch.setattr(
+        cs,
+        "bytes_transport",
+        lambda u, h, c: (200, PAGE_IMAGE) if u.endswith("a.jpg") else (404, b""),
+    )
+    record = ChapterRecord(ordinal=9, slug="chapter-9", label="Chapter 9", number=9.0)
+
+    code = cs.run(SERIES, tmp_path, Manifest("T", SERIES, [record]), [record], delay=0)
+
+    assert code == 1
+    assert cs.pages_on_disk(tmp_path, 9) == 1
+    out = capsys.readouterr().out
+    assert "1 page(s) failed" in out
 
 
 def test_the_manifest_is_written_even_when_the_chapter_has_no_pages(tmp_path, monkeypatch):
