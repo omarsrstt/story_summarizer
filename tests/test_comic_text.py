@@ -166,6 +166,47 @@ def test_short_blocks_are_never_split():
     assert resegment("DARV") == "DARV"
 
 
+def test_short_fused_dialogue_is_repaired_without_a_glossary():
+    # Regression: the 7-letter floor meant no run shorter than "BLOCKHIMFROM"
+    # was ever repaired, so these survived into transcripts as single tokens.
+    # 40+ occurrences across seven real chapters. Every part here is a common
+    # word, which is what distinguishes them from names.
+    assert resegment("HEHAS YOUR HAIR!") == "he has YOUR HAIR!"
+    assert resegment("IWAS") == "i was"
+    assert resegment("TOFORM") == "to form"
+    assert resegment("AREYOU") == "are you"
+    assert resegment("WELL,ASMUCH as i want") == "WELL,as much as i want"
+
+
+def test_a_short_proper_noun_is_still_not_split():
+    # The same length window as the repaired cases above. These parts are rare
+    # or unknown words, so the cost gate refuses them -- no glossary needed.
+    # (Seven-letter names such as ETISTIN take the older long-run rule and still
+    # split; that is a pre-existing limit the glossary covers, not a regression.)
+    for name in ("SAPIN", "XYRUS", "DARV", "BURIM", "VALDEN", "ASHBER"):
+        assert resegment(name).upper() == name, f"{name} was split"
+
+
+def test_a_word_already_in_the_dictionary_is_never_split():
+    # "MANA" is a real dictionary word, but the segmenter offers "man a".
+    # Splitting an existing word can only lose information.
+    for word in ("MANA", "ALICE", "VIRION", "CONJURER", "ART", "REYNOLDS"):
+        assert resegment(word) == word, f"{word} was split"
+
+
+def test_a_contraction_tail_is_not_invented():
+    # "they re" and "what re" put a token on the page that was never there.
+    assert resegment("THEYRE") == "THEYRE"
+    assert resegment("WHATRE") == "WHATRE"
+
+
+def test_a_suffix_is_not_shaved_off_a_stem():
+    # AUGMENTER is a core term of the setting. "augment er" is damage, and it
+    # was already happening under the old 7-letter rule because the run is 9.
+    for term in ("AUGMENTER", "AUGMENTERS"):
+        assert resegment(term).upper() == term, f"{term} was split"
+
+
 def test_unprotected_long_name_splits_when_no_glossary_is_given():
     # Documents the limit honestly: without outside knowledge the segmenter has
     # only a dictionary, and "sap in" and "block him from" are the same shape.

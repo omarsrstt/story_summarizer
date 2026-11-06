@@ -339,11 +339,26 @@ Two OCR defects are corrected, since both visibly corrupt a transcript:
   so it cannot shred names — `SAPIN` stays `SAPIN` rather than becoming `sap in`.
 - **Hallucinated CJK glyphs** inside otherwise English text, which also crashed a cp1252 console.
 
+Short fused words need a different test from long ones. A run of 7+ letters is assumed fused; a
+shorter run is ambiguous, because `HEHAS` (`he has`) and `SAPIN` (a place) are the same shape. Short
+runs are therefore split only when **every part is a common English word** — `HEHAS` (cost 5.8),
+`IWAS` (6.6), `TOFORM` (8.0) and `ABIT` (9.6) qualify, while `ETISTIN` (10.5), `SAPIN` (11.7) and
+`ELENOIR` (13.8) do not. The 10.0 cut-off sits in a measured gap on the real corpus, not a tuned
+point. A run that is already a word is never split (`MANA`, `ALICE`), a contraction tail is never
+invented (`THEYRE` stays whole rather than becoming `they re`), and a suffix is never shaved off a
+stem (`AUGMENTER`, not `augment er`).
+
 Proper nouns are the limit of what a dictionary can infer: nothing in the text distinguishes
 `sap in` from `block him from`. `src/comic_config.json` therefore carries a per-series `glossary`
 of names and story terms; add to it whenever a recap mangles a name. The same file holds the tile
 geometry. It is tracked and holds nothing site-specific — the site's address lives in the
 gitignored `src/comic_site.json` instead.
+
+The glossary is an aid, not a measure of quality. Most comics have no source novel, so a fix that
+only works because names were supplied is not a fix — judge a change by how it performs with an
+empty glossary. Quality can still be tracked without one by counting tokens that are neither
+dictionary words nor glossary terms: on comic chapter 2 the short-run repair above took that from
+5.2% to 3.4% and removed every fused-word token.
 
 Filtering uses the segmenter's own 126k-word list rather than length guesses, which on a real
 chapter kept 287 of 294 blocks and dropped only page furniture (`213.`, `+`, `/`, `7`). A rare

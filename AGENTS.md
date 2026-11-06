@@ -135,6 +135,35 @@ So the join between comic and novel stages is **plain integers on disk**. Neithe
 nor `summarize.py` knows the comic scraper exists, and neither was modified for it. That is why the
 manifest pins ordinals rather than trusting site numbers.
 
+### The novel is a test oracle, never an input
+
+Most comics have **no associated novel**, so the goal is an OCR pipeline whose quality does not
+depend on one existing. That makes this a hard rule, not a preference:
+
+* **Allowed:** read the novel to *measure* the pipeline and find generic defects. It is how the
+  `_MIN_RUN` bug was found — novel text showed `HEHAS`/`IWAS` surviving as single tokens when they
+  were plainly `he has`/`i was`.
+* **Forbidden:** let novel text reach a transcript. No copying spellings in, no per-chapter
+  correction pass, no runtime lookup. A fix that only works because a novel exists does not
+  generalise, and hides the defects a comic-only series would hit.
+
+The per-series `glossary` is a legitimate **user-facing** aid, but it is content, not pipeline
+quality: filling it from the novel would make the measurement flattering and prove nothing. Judge a
+pipeline change by whether it helps with an **empty** glossary.
+
+Two traps when pairing the trees:
+
+* **Never align by chapter number.** Measured on this comic, the offset drifts: comics 1–3 map to
+  novels 1–3 (offset 0), comic 147 → novel 100 (offset 47), comic 181 → novel 138 (offset 43). Align
+  by content.
+* **Some chapters have no counterpart.** Comics 182 and 183 are sparse bonus chapters whose best
+  novel match is indistinguishable from noise (score margin ≈ 0.000). A harness must report those as
+  *unmatched*, never as OCR failures.
+
+The transliteration cost is measurable without a novel, which is what makes progress checkable:
+count tokens that are not dictionary words and not glossary terms. On comic chapter 2 the
+`_MIN_RUN` fix moved that from 5.2% to 3.4%, and every fused-word token disappeared.
+
 ### Config: the site is never tracked
 
 The repo is **public**, so the site this tool targets is deliberately absent from it — this is a
