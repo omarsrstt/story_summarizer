@@ -188,6 +188,12 @@ src/scraper_config.json
 # comic_site.example.json. The tracked comic_config.json must stay publishable.
 src/comic_site.json
 
+# Comic ordinal -> novel chapter pairing for the novel-backed benchmark
+# (src/comic_benchmark.py). Series knowledge, not pipeline knowledge: the offset
+# drifts (0, then 47, then 43 on the one series measured), so it does not
+# generalise and must not be published. Copy src/comic_pairing.example.json.
+src/comic_pairing.json
+
 # Fast scraper's cached Cloudflare cookie + chapter list (site-specific, local only)
 .scraper_cache/
 

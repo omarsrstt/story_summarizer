@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Comic ordinal -> novel chapter, for src/comic_benchmark.py's --pairing.",
+    "",
+    "Copy to src/comic_pairing.json (gitignored) and fill in by hand. This is",
+    "SERIES knowledge, not pipeline knowledge: the offset drifts between",
+    "chapters, so it cannot be derived arithmetically. Never commit the filled",
+    "copy.",
+    "",
+    "Keys are comic ordinals (the number in novels/comic-<name>/chapter_NNNNN.txt),",
+    "values are novel chapter numbers. Omit a chapter that has no counterpart --",
+    "the benchmark reports those as unmatched, which is correct for bonus",
+    "chapters, rather than as OCR failures.",
+    "",
+    "The benchmark aligns by content anyway; the file is a cross-check. If an",
+    "entry disagrees with the measured best match, the run says so and exits 1.",
+    "That protects the pipeline: a wrong pairing must not be reported as bad OCR."
+  ],
+  "pairs": {
+    "1": 1
+  }
+}

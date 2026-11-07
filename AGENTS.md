@@ -214,6 +214,51 @@ The transliteration cost is measurable without a novel, which is what makes prog
 count tokens that are not dictionary words and not glossary terms. On comic chapter 2 the
 `_MIN_RUN` fix moved that from 5.2% to 3.4%, and every fused-word token disappeared.
 
+### The benchmark: what a novel can measure, and what it cannot
+
+`src/comic_benchmark.py` is the **local** instrument that puts numbers on the oracle rule. It is
+read-only by construction (verified by hashing the corpus before and after a run) and the pipeline
+never imports it; a test enforces that by reading the source of `comic_reader`, `comic_check` and
+`comic_text`.
+
+**Recall is not measurable.** The comic is an adaptation with roughly half the novel's word count,
+so a missing sentence is usually a legitimate cut. Reporting coverage would punish the adapter for
+adapting. What survives is transcription accuracy on the words that *are* present:
+
+| Output | Means |
+| --- | --- |
+| `name spelling` | of the names the transcript produced that the novel also knows, how many were spelled the novel's way |
+| `misread names` | `transcript -> novel`, one edit apart, with `near=` chapters of distance to the novel's nearest use |
+| `glossary gaps` | names spelled correctly that the segmenter *would* split, so they need an entry |
+| `adaptation spellings` | the comic and novel differ on purpose — **not** an error |
+| `suspicious explained` | of `comic_check`'s suspicious tokens, how many map to a novel name |
+
+Current baseline on the 5 alignable chapters: **95.7% of recognised names exact** (44/46).
+
+Four measured traps, all found on the real corpus, all now guarded by tests:
+
+* **A ratio over every name-shaped token is a lie.** `exact / name_tokens` read 43% because the
+  denominator included detector junk (`KWNI`, `EHNH`). The metric is `exact / recognised`, and junk
+  is reported separately as `name_unknown`.
+* **Distance-1 alone manufactures findings.** Unguarded, it reported `AGB -> Agh`, `NOOI -> NOOO`
+  and `RAAH -> Riah` as misread names. All three are wrong: `Agh` appears **once** in 10 MB, `NOOO`
+  is 4/4 all-caps, and `Riah` first appears in novel **287** while comic 2 aligns to novel 2. A name
+  must now be Title Case *and* used at least twice; the distance is printed so a coincidence is
+  visible.
+* **The glossary outranks the novel.** The tracked glossary has `ASHBERN`; the novel uses `Ashber`
+  39 times and `Ashbern` never. The raw OCR settles it — `Ashbern Town` at **0.96 confidence** — so
+  the *comic* spells it that way. An earlier version of this tool called that a "glossary defect",
+  which would have corrupted a correct tracked file on the novel's authority. It is reported as an
+  adaptation spelling, never as wrong.
+* **A "glossary gap" is only a gap if the splitter would split it.** Dropping that condition
+  reported 11 candidates, of which 10 needed no entry (`Dawsid`, `Eksire`, `Ack`, `Aww`, `Here's`).
+  Only `Goodsky` (`good sky`) needs one.
+
+The pairing between the trees is series knowledge, so it lives in the **gitignored**
+`src/comic_pairing.json` (`src/comic_pairing.example.json` is tracked). It is a cross-check, not the
+mechanism — alignment is by content, and an entry that disagrees with the measured best match makes
+the run **exit 1** so a bad pairing is never reported as bad OCR.
+
 ### Config: the site is never tracked
 
 The repo is **public**, so the site this tool targets is deliberately absent from it — this is a
@@ -342,6 +387,14 @@ deletes text: assert what survives *and* read what does not. Everything else (sc
 model output) is verified manually: run a script against a small chapter range and read the output.
 Prefer adding small unit tests for the parsing helpers (`parse_chapter_selection`,
 `parse_chapter_input`, `chunk_text`) when changing them.
+
+The benchmark has its own suite (`test_comic_benchmark.py`) under the same rule, and it earned its
+keep during construction: the load-bearing sweep caught an *untested* fidelity floor (setting it to
+a billion left the suite green) and a glossary-gap rule that never fired. But the defects that
+mattered were found by running it against the 516-chapter novel and reading the output — the fake
+`AGB -> Agh` misread, the 43%-that-should-be-96% ratio, and the `ASHBERN` inversion all looked
+plausible as numbers. **A benchmark needs its output read, not just its tests run**: a metric that is
+green and wrong is the most expensive kind, because it steers the next change.
 
 Unit tests cannot catch the failures that matter most here. Every serious defect in the comic
 scraper was found by a **live** run on a handful of chapters, not by the suite: the page-1
