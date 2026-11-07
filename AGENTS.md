@@ -135,6 +135,20 @@ So the join between comic and novel stages is **plain integers on disk**. Neithe
 nor `summarize.py` knows the comic scraper exists, and neither was modified for it. That is why the
 manifest pins ordinals rather than trusting site numbers.
 
+A fourth script, `src/comic_check.py`, sits beside the reader and validates what it wrote. It is
+**novel-free by design** — it reads only the transcripts and the manifest — so it can gate a pipeline
+change on any comic. Findings are `fail` (unambiguous: CJK glyphs, control bytes, fused runs the
+shipped rule would split, page markers past the images, chapters short of their manifest page count)
+or `warn` (a smell that shares its shape with real text: a glossary term split into ordinary words, a
+rare non-dictionary token, an OCR repetition loop, credits left in prose). Invention fails on the
+unambiguous classes; **loss is measured, never gated**, because without a reference a dropped line and
+a cut line produce identical findings. The `fused` finding gates **staleness**, not correctness: it
+compares a transcript to the rule as it is now, so re-running the reader after a bad rule change makes
+the two agree and hides the regression — that shows up only as a rise in the suspicious rate. Two
+false-positive classes were found while building it and are pinned by tests: transcripts only mark
+pages that produced text (so a silent page is not a gap), and a fingerprint-confirmed duplicate
+(`Chapter 144.0`) is never downloaded by design (so it is not short).
+
 ### The novel is a test oracle, never an input
 
 Most comics have **no associated novel**, so the goal is an OCR pipeline whose quality does not
@@ -279,10 +293,14 @@ prompt-set resolution, `llama-server` lifecycle, and the batching/geometry helpe
 `--group-size`, `--digest` and `--all`. It also covers the comic downloader: label selection and
 ordinal pinning (`test_comic_selection.py`, `test_comic_manifest.py`), fingerprinting and the
 duplicate rules (`test_comic_images.py`, `test_comic_scraper.py`), and filename/grouping
-(`test_comic_naming.py`). Everything else (scraping, OCR, real model output) is verified manually:
-run a script against a small chapter range and read the output. Prefer adding small unit tests for
-the parsing helpers (`parse_chapter_selection`, `parse_chapter_input`, `chunk_text`) when changing
-them.
+(`test_comic_naming.py`). The transcript validator has its own suite (`test_comic_check.py`), where
+each detector must be provably load-bearing: disable it and a named test has to fail. That rule
+found three real defects in the validator itself — a page-gap check built on a false premise, a
+fused check that split glossary names, and a noise count that treated every contraction as
+non-word — none of which a green suite had caught. Everything else (scraping, OCR, real model
+output) is verified manually: run a script against a small chapter range and read the output.
+Prefer adding small unit tests for the parsing helpers (`parse_chapter_selection`,
+`parse_chapter_input`, `chunk_text`) when changing them.
 
 Unit tests cannot catch the failures that matter most here. Every serious defect in the comic
 scraper was found by a **live** run on a handful of chapters, not by the suite: the page-1

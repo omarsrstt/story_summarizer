@@ -360,6 +360,54 @@ empty glossary. Quality can still be tracked without one by counting tokens that
 dictionary words nor glossary terms: on comic chapter 2 the short-run repair above took that from
 5.2% to 3.4% and removed every fused-word token.
 
+#### Checking a transcript (no novel needed)
+
+`src/comic_check.py` reads the transcripts already on disk and says whether they are trustworthy.
+It is deliberately novel-free, because most comics have no source novel — a check that needs one
+cannot tell you whether the pipeline is healthy.
+
+```bash
+uv run python src/comic_check.py -n comic-TBATE
+uv run python src/comic_check.py -n comic-TBATE --comics comics/TBATE   # + page counts
+uv run python src/comic_check.py -n comic-TBATE --json
+```
+
+Findings come in two severities, and the split is the whole design:
+
+`fail` (exit status 1) — unambiguous:
+- `cjk` — hallucinated CJK glyphs; never story text in an English comic.
+- `nonprintable` — control bytes that reached disk.
+- `fused` — a run the shipped segmentation rule would split. This is a **staleness** gate: it
+  fires when the rule changed and the transcripts were not re-run. Glossary names are consulted
+  first, and only *cheap* splits count, because `ETISTIN` (10.5) is a name that splits expensively
+  while fused dialogue tops out at 9.6. Re-running the reader makes the text agree with whatever
+  rule produced it, so a *regression* in the rule itself is invisible here — that shows up only as
+  a rise in the suspicious rate, and is what `tests/test_comic_text.py` pins.
+- `page_out_of_range` — a page marker pointing past the images on disk.
+- `page_short` (with `--comics`) — a chapter short of the page count its manifest recorded. This
+  is how the real defect is caught: `Chapter 144` lists 81 pages and the site served HTTP 200 with
+  zero bytes for one of them.
+
+`warn` — a real smell that shares its shape with legitimate text:
+- `term_split` — a glossary term appears as ordinary words (`MANA` → `man a`). It cannot fail a
+  run: "a man a day" is ordinary English.
+- `noise` — tokens that are neither dictionary words nor glossary terms. A rare name is
+  indistinguishable from detector noise, so this is counted, not gated.
+- `repeat` — one line repeated many times, which is what an OCR loop looks like.
+- `credit` — credit blocks and site watermarks left in the prose.
+
+Invention is treated as worse than loss, but only the *unambiguous* invention classes fail. Loss
+is **measured, not gated**: without a reference, a dropped line and a cut line produce identical
+findings, so the `suspicious rate` is reported as a trend rather than used as a pass/fail.
+
+Two false-positive classes were found and removed while building this, and both are pinned by
+tests: page markers only exist for pages that produced text, so a silent page is normal and
+comparing marker count to page count is wrong; and a detected duplicate (`Chapter 144.0`) is never
+downloaded by design, so it is not a missing chapter.
+
+Every check was validated by disabling it and confirming a test fails. The suite is
+`tests/test_comic_check.py`.
+
 Filtering uses the segmenter's own 126k-word list rather than length guesses, which on a real
 chapter kept 287 of 294 blocks and dropped only page furniture (`213.`, `+`, `/`, `7`). A rare
 noise token still gets through, because the word list contains abbreviations like `nih`; tightening
