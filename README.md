@@ -185,8 +185,16 @@ uv run python src/summarize.py -n comic-TBATE -c 1-5 -g 5 --digest
 
    - `--series`: series name; the reader prefixes it to form the slug.
    - `--comics`: directory of page images.
-   - `--only`: `all`, `1`, `1-3` (default: all).
+   - `--only`: `all`, `1`, `3`, `1-3,6` (default: all).
    - `--overwrite`: re-read chapters that already have a transcript.
+
+Each chapter's first and last pages usually carry the scan group's credits — a URL, an `@handle`,
+and a `Role: Name` block. The reader drops those lines from the flat transcript, so the recap
+prompt is story and not advertising. The rule keys on **shape**, never on credit vocabulary, because
+`to control MANA is` is dialogue: see `comic_text.is_credit_line`. The structured
+`transcripts/<slug>/chapter_NNNNN.jsonl` keeps every block, so nothing the detector saw is lost and
+the decision can be revisited without re-reading 50 images. Re-run with `--overwrite` to benefit for
+transcripts written before this existed.
 
 #### Downloading the pages
 
@@ -394,11 +402,21 @@ Findings come in two severities, and the split is the whole design:
 - `noise` — tokens that are neither dictionary words nor glossary terms. A rare name is
   indistinguishable from detector noise, so this is counted, not gated.
 - `repeat` — one line repeated many times, which is what an OCR loop looks like.
-- `credit` — credit blocks and site watermarks left in the prose.
+- `credit` — credit blocks and site watermarks that survived into the prose. Judged by
+  `comic_text.keep_credit_mask`, the *same* rule the reader uses to drop them, so a freshly read
+  transcript reports nothing here; a hit means the transcript predates the rule. The previous
+  version carried its own marker list, which drifted from the reader and named a third-party site.
 
 Invention is treated as worse than loss, but only the *unambiguous* invention classes fail. Loss
 is **measured, not gated**: without a reference, a dropped line and a cut line produce identical
 findings, so the `suspicious rate` is reported as a trend rather than used as a pass/fail.
+
+**Quote the count, not just the rate.** The rate is a ratio, so it moves when the number of words
+moves. Dropping credits from the 7-chapter corpus took suspicious tokens from **97 to 67** while the
+rate only went 2.6% → 2.0%; on chapter 183 the rate actually *rose* (3.75% → 4.55%) even though its
+count fell 6 → 4, because the credits were ordinary English and shrank the denominator. The summary
+line prints both (`suspicious 67/3415 tokens (2.0%)`), and `--json` carries `suspicious_tokens` and
+`tokens` alongside `suspicious_rate`.
 
 Two false-positive classes were found and removed while building this, and both are pinned by
 tests: page markers only exist for pages that produced text, so a silent page is normal and
@@ -406,7 +424,8 @@ comparing marker count to page count is wrong; and a detected duplicate (`Chapte
 downloaded by design, so it is not a missing chapter.
 
 Every check was validated by disabling it and confirming a test fails. The suite is
-`tests/test_comic_check.py`.
+`tests/test_comic_check.py`. The credit rule was checked the same way: neutering
+`is_credit_line` fails 11 named tests across `test_comic_text.py` and `test_comic_check.py`.
 
 Filtering uses the segmenter's own 126k-word list rather than length guesses, which on a real
 chapter kept 287 of 294 blocks and dropped only page furniture (`213.`, `+`, `/`, `7`). A rare

@@ -127,13 +127,49 @@ Three scripts, each writing the next stage's input:
    `comics/<name>/c_<ordinal>/c_<ordinal>_<page>.<ext>` (one folder per chapter).
    Also writes `comics/<name>/chapters.json`, the **authoritative manifest**.
 2. `src/comic_reader.py` — OCRs the pages into `novels/comic-<name>/chapter_NNNNN.txt`, one file
-   per chapter, using the same `chapter_%05d` convention the novel scraper uses.
+   per chapter, using the same `chapter_%05d` convention the novel scraper uses. It drops
+   scan-group credit lines from the flat transcript (see below); the structured
+   `transcripts/<slug>/chapter_NNNNN.jsonl` keeps every block, so the decision can be revisited
+   without re-reading the images.
 3. `uv run python src/summarize.py -n comic-<name>` — unchanged from the novel path; it just sees
    another slug.
 
 So the join between comic and novel stages is **plain integers on disk**. Neither `comic_reader.py`
 nor `summarize.py` knows the comic scraper exists, and neither was modified for it. That is why the
 manifest pins ordinals rather than trusting site numbers.
+
+### Credit lines are furniture, and are matched by shape
+
+A chapter's first and last pages carry the scan group's credits — a URL, a social handle, and a
+`Role: Name` block. They are the page's producer, not its story. `comic_text.is_credit_line` drops
+them, and the reader applies it via `keep_credit_mask` before writing the flat transcript.
+
+The rule keys on **structure**, never on credit vocabulary, and that is measured rather than
+preferred. "control", "original" and "comic" are ordinary English: a rule matching them deleted
+`to control MANA is` and `HAVING THE control of`, both real dialogue. `ORIGINAL.` on page 50 of
+chapter 181 is the punchline of `NOT VERY / ORIGINAL.`. The four shapes kept are a URL or domain, an
+`@handle`, a line led by a role word (`ComicArtist:Fuyuki23` — the OCR glues the space out), and a
+bare name following a role line (`ART BY` / `TURTLEME`). Safety comes from *whole-phrase* role
+matching: an earlier draft accepted any line containing a job word, so `ART IS LOOKING` made
+`AT HIMSELF IN` look like an artist and `to even control` ate `the bodily functions`.
+
+A **block** rule — once a credit is found, keep dropping short lines — was tried and removed. Every
+line of a real credit block is one or two words, but so is `THE MIRROR!`, `RUMBLE` and `VIRION!`,
+which it deleted from the real corpus. Credits are not reliably contiguous at the text level, so the
+local rule wins. Names split onto their own line are left behind as `noise` warnings — the honest
+cost of never deleting story text. The one contextual shape is still guarded twice: the line must be
+short *and* contain no dictionary word, because `it is imperative` follows `assistant editors` and a
+length-only rule ate it.
+
+`comic_check._credit_findings` uses `keep_credit_mask` too, so the warning describes what the reader
+actually does. It previously carried its own marker list (`quality control`, `turtleme`, and a site
+name) which had drifted from the reader and also put that site name in tracked code.
+
+**The suspicious-rate is a ratio, so quote the count.** Scrubbing credits took chapter 183 from 6
+suspicious tokens to 4 while its rate *rose* from 3.75% to 4.55%: the credits were ordinary English,
+so removing them shrank the denominator more than the numerator. Across the 7-chapter corpus the
+change was 97 -> 67 suspicious tokens (2.63% -> 2.0%), and every `credit` and `repeat` warning
+disappeared. `comic_check` now reports both numbers for that reason.
 
 A fourth script, `src/comic_check.py`, sits beside the reader and validates what it wrote. It is
 **novel-free by design** — it reads only the transcripts and the manifest — so it can gate a pipeline
@@ -297,8 +333,13 @@ duplicate rules (`test_comic_images.py`, `test_comic_scraper.py`), and filename/
 each detector must be provably load-bearing: disable it and a named test has to fail. That rule
 found three real defects in the validator itself — a page-gap check built on a false premise, a
 fused check that split glossary names, and a noise count that treated every contraction as
-non-word — none of which a green suite had caught. Everything else (scraping, OCR, real model
-output) is verified manually: run a script against a small chapter range and read the output.
+non-word — none of which a green suite had caught. It also caught three in the credit filter, all
+by deleting real dialogue: a "block" rule that ate `THE MIRROR!`/`RUMBLE`/`VIRION!`, a role test
+that accepted any line *containing* a job word (`ART IS LOOKING` → `AT HIMSELF IN` gone), and a
+length-only context rule that ate `it is imperative`. None appeared until the scrubber was run over
+the real corpus and its removals read line by line, which is the only way to test a filter that
+deletes text: assert what survives *and* read what does not. Everything else (scraping, OCR, real
+model output) is verified manually: run a script against a small chapter range and read the output.
 Prefer adding small unit tests for the parsing helpers (`parse_chapter_selection`,
 `parse_chapter_input`, `chunk_text`) when changing them.
 

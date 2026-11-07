@@ -56,7 +56,14 @@ from pathlib import Path
 
 import wordninja
 
-from comic_text import _DICTIONARY, _SPLIT_COST_LIMIT, _split_cost, has_cjk, resegment
+from comic_text import (
+    _DICTIONARY,
+    _SPLIT_COST_LIMIT,
+    _split_cost,
+    has_cjk,
+    keep_credit_mask,
+    resegment,
+)
 
 # ``# TBATE chapter 147`` / ``# comic-TBATE chapter 1``. The number is the
 # ordinal on disk, not the site's label.
@@ -72,20 +79,12 @@ _NONPRINTABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _REPEAT_THRESHOLD = 5
 _REPEAT_MIN_TOKENS = 1
 
-# Credit blocks and site watermarks. Matched on the line, case-insensitively,
-# because they appear verbatim and never as prose.
-_CREDIT_MARKERS = (
-    "original novel and script",
-    "comic artist",
-    "quality control",
-    "turtleme",
-    "fuyuki",
-    "kisai",
-    "isekaiscan",
-    "ctopreadmanhwa",
-    "readmanhwa",
-    "tbatevolume",
-)
+# Credit lines are decided by ``comic_text.is_credit_line``, the same rule the
+# reader uses to drop them. This module used to carry its own marker list --
+# "quality control", "turtleme", "<site>" -- which drifted from the reader: it
+# flagged lines the reader keeps and missed ones it drops, so the warning never
+# described what the pipeline actually did. One rule, one place. The marker list
+# also named a third-party site, which is never written into tracked code.
 
 
 @dataclass
@@ -182,19 +181,38 @@ def _is_known(word: str, protected: set[str]) -> bool:
     return without in _DICTIONARY or without in protected
 
 
+def suspicious_tokens(transcript: Transcript, glossary) -> list[str]:
+    """The tokens counted as suspicious, in order.
+
+    Exposed because the *rate* alone cannot be compared across a change that
+    removes words. Scrubbing credits lowered chapter 183 from 6 suspicious
+    tokens to 4, yet its rate rose 3.75% -> 4.55%: the credits were ordinary
+    English, so removing them shrank the denominator more than the numerator.
+    Any report of progress has to quote the count as well as the share.
+    """
+
+    protected = {term.lower() for term in glossary}
+    return [
+        token
+        for token in _tokens(transcript.text)
+        if len(token) > 1 and not _is_known(token, protected)
+    ]
+
+
 def suspicious_rate(transcript: Transcript, glossary) -> float:
     """Share of tokens that are neither dictionary words nor glossary terms.
 
     This is the novel-free quality number: it needs no reference text, so it
-    works on a comic whose source novel does not exist.
+    works on a comic whose source novel does not exist. It is a ratio, so it is
+    only comparable between transcripts of similar length -- quote
+    :func:`suspicious_tokens` alongside it when judging a change that also
+    changes how many words survive.
     """
 
-    protected = {term.lower() for term in glossary}
     tokens = _tokens(transcript.text)
     if not tokens:
         return 0.0
-    bad = [t for t in tokens if len(t) > 1 and not _is_known(t, protected)]
-    return len(bad) / len(tokens)
+    return len(suspicious_tokens(transcript, glossary)) / len(tokens)
 
 
 def _fused_run_findings(transcript: Transcript, glossary) -> list[Finding]:
@@ -326,11 +344,16 @@ def _repeat_findings(transcript: Transcript) -> list[Finding]:
 
 
 def _credit_findings(transcript: Transcript) -> list[Finding]:
-    hits = [
-        line.text
-        for line in transcript.lines
-        if any(marker in line.text.lower() for marker in _CREDIT_MARKERS)
-    ]
+    """Credit lines that survived into the transcript.
+
+    Judged by ``keep_credit_mask`` -- the reader's own rule, including the
+    previous-line shape ("ART BY" / "TURTLEME"). Reusing it rather than
+    re-deriving a marker list means a clean transcript reports nothing and any
+    hit is a line the reader would itself have dropped.
+    """
+
+    texts = [line.text for line in transcript.lines]
+    hits = [text for text, keep in zip(texts, keep_credit_mask(texts)) if not keep]
     if not hits:
         return []
     return [
@@ -546,9 +569,8 @@ def main(argv=None) -> int:
             transcript, glossary, expected_pages=page_counts.get(transcript.chapter)
         )
         failures += sum(1 for f in findings if f.severity == "fail")
-        tokens = _tokens(transcript.text)
-        total_tokens += len(tokens)
-        total_suspicious += int(suspicious_rate(transcript, glossary) * len(tokens))
+        total_tokens += len(_tokens(transcript.text))
+        total_suspicious += len(suspicious_tokens(transcript, glossary))
         rows.append((path.name, transcript.chapter, findings))
 
     # Manifest findings are collected before printing so ``--json`` emits one
@@ -565,6 +587,8 @@ def main(argv=None) -> int:
                 "suspicious_rate": (
                     total_suspicious / total_tokens if total_tokens else 0.0
                 ),
+                "suspicious_tokens": total_suspicious,
+                "tokens": total_tokens,
                 "failures": failures,
                 "findings": [
                     {
@@ -596,7 +620,7 @@ def main(argv=None) -> int:
         rate = total_suspicious / total_tokens if total_tokens else 0.0
         print(
             f"\n{len(transcripts)} chapter(s), {failures} failure(s), "
-            f"suspicious rate {100 * rate:.1f}%"
+            f"suspicious {total_suspicious}/{total_tokens} tokens ({100 * rate:.1f}%)"
         )
 
     return 1 if failures else 0

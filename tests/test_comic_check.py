@@ -19,7 +19,9 @@ from comic_check import (
     load_glossary,
     parse_transcript,
     suspicious_rate,
+    suspicious_tokens,
 )
+from comic_text import keep_credit_mask
 
 
 def _transcript(chapter: int = 1, body: str = "") -> str:
@@ -180,6 +182,43 @@ def test_credit_and_watermark_text_warns():
     assert "credit" in {f.kind for f in findings if f.severity == "warn"}
 
 
+def test_a_scrubbed_transcript_reports_no_credit_finding():
+    # The validator and the reader share ``keep_credit_mask``. A transcript the
+    # reader has already scrubbed must therefore be clean by the same rule --
+    # this is the drift that two separate marker lists produced before.
+    body = (
+        "--- page 1 ---\n"
+        "STORY BY\nTURTLEME\nART BY\nFUYUKI23\n"
+        "scan-site.test\n"
+        "SO THIS IS THE PLACE.\n"
+    )
+    lines = body.splitlines()[1:]
+    scrubbed = keep_credit_mask(lines)
+    survivors = [text for text, keep in zip(lines, scrubbed) if keep]
+    assert "credit" not in {
+        f.kind
+        for f in check_transcript(
+            parse_transcript("--- page 1 ---\n" + "\n".join(survivors)), glossary=[]
+        )
+    }
+
+
+def test_a_bare_name_after_a_role_line_is_reported_as_a_credit():
+    # The previous-line shape lives in the shared rule, so the validator sees it
+    # too. A per-line marker list could not: "FUYUKI23" contains no marker.
+    body = "--- page 1 ---\nART BY\nFUYUKI23\n"
+    findings = check_transcript(parse_transcript(_transcript(1, body)), glossary=[])
+    assert "credit" in {f.kind for f in findings if f.severity == "warn"}
+
+
+def test_credit_vocabulary_in_dialogue_is_not_a_credit_finding():
+    # "control" and "original" are ordinary English. The shared rule keys on
+    # structure, so sentence-shaped lines are never reported.
+    body = "--- page 1 ---\nto control MANA is\nNOT VERY\nORIGINAL.\n"
+    findings = check_transcript(parse_transcript(_transcript(1, body)), glossary=[])
+    assert "credit" not in {f.kind for f in findings if f.severity == "warn"}
+
+
 # -- page integrity --------------------------------------------------------
 
 
@@ -234,6 +273,20 @@ def test_suspicious_rate_is_a_fraction_of_tokens():
     t = parse_transcript(_transcript(1, "--- page 1 ---\nKWNI ART\n"))
     rate = suspicious_rate(t, glossary=[])
     assert 0.0 < rate < 1.0
+
+
+def test_suspicious_tokens_are_reported_as_a_count():
+    # The rate alone misleads when a change alters how many words survive:
+    # scrubbing credits took chapter 183 from 6 suspicious tokens to 4 while its
+    # rate *rose* from 3.75% to 4.55%, because the credits were ordinary English
+    # and shrank the denominator. The count is the comparable number.
+    t = parse_transcript(_transcript(1, "--- page 1 ---\nKWNI ART dWHHL\n"))
+    assert sorted(suspicious_tokens(t, glossary=[])) == ["KWNI", "dWHHL"]
+
+
+def test_suspicious_tokens_honour_the_glossary():
+    t = parse_transcript(_transcript(1, "--- page 1 ---\nXYRUS KWNI\n"))
+    assert suspicious_tokens(t, glossary=["XYRUS"]) == ["KWNI"]
 
 
 # -- glossary loading ------------------------------------------------------

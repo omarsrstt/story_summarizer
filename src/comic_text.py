@@ -253,3 +253,221 @@ def words_in(text: str) -> int:
         elif not _CONTRACTION.match(run) or len(run) > 1:
             total += 1
     return total
+
+
+# -- credit and watermark lines ---------------------------------------------
+#
+# A chapter's first and last pages carry the scan group's credits: a URL, a
+# social handle, and a "Role: Name" block. They are the page's producer, not its
+# story, and they were 24 of the 97 suspicious tokens in a 7-chapter corpus.
+#
+# The rule keys on *structure*, never on credit vocabulary, because the
+# vocabulary is ordinary English. Measured on the real corpus, "to control MANA
+# is" and "HAVING THE control of" are dialogue, and a rule matching "control"
+# or "original" deletes them. Structure separates the two cases cleanly.
+
+# A domain, a protocol, or a shortener. A URL is furniture wherever it appears.
+# ``test`` is in the list because that is this project's reserved placeholder
+# TLD (see comic_site.example.json): a rule that cannot recognise its own
+# placeholder is awkward to test without naming a real site.
+_URL = re.compile(
+    r"(?:https?://|www\.|\b[a-z0-9-]+\.(?:com|net|org|ly|io|me|test)\b)",
+    re.IGNORECASE,
+)
+
+# A social handle. Requires two characters after the @ so a stray mark is not
+# read as a handle.
+_HANDLE = re.compile(r"@[A-Za-z0-9_]{2,}")
+
+# "Role: Name", the shape of a credit block. Both sides must be short and
+# capitalised like a title, and the left side must be a job anyone would
+# recognise -- this is what stops "He said: I will not go." being dropped.
+#
+# Spaces are optional inside a role because the recogniser drops them:
+# "ComicArtist:Fuyuki23" is a single glued run, and "QualtyControl" is a
+# misspelt "Quality Control". Both were measured in the real corpus.
+#
+# No publisher or site name appears here. An earlier draft matched "tapas",
+# "isekai" and "tbate"; deleting all three changed *nothing* on the real corpus,
+# because the URL rule and the trailing "entertainment" already covered them.
+# A generic pipeline rule must not need this one series' brands.
+_CREDIT_ROLE = re.compile(
+    r"^\s*(?:\()?(?:"
+    r"original(?:\s|$)|\s*novel|"
+    r"comic\s*artist|"
+    r"qual[a-z]*\s*control|"
+    r"art\s*by|"
+    r"story\s*by|"
+    r"presented\s*by|"
+    r"translat(?:or|ion)|"
+    r"entertainment"
+    r")",
+    re.IGNORECASE,
+)
+
+# A line that ends as a bare role, which is how a credit block is sometimes
+# split across two lines ("quality control by"), or that ends with the
+# publisher's name ("KISAI ENTERTAINMENT", "(kisa i entertainment)"). "original"
+# is deliberately not here: "NOT VERY / ORIGINAL." is dialogue, measured on page
+# 50 of chapter 181.
+_CREDIT_TAIL = re.compile(
+    r"\b(?:quality\s*control(?:\s+by)?|entertainment)\s*\)?\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+# Four words is the longest real hit ("Quality Control: Kisai Entertainment").
+# The guard used to be six, which also caught ordinary sentences: "I do it for
+# entertainment." is five words and ends the same way. Kept tight because the
+# measured evidence is 2-4 words, never more.
+_CREDIT_TAIL_WORDS = 4
+
+# The credits page also writes "role/name": "lining assistant/MIKAGE",
+# "coloring assistants/an sean de fu aka". Requiring the role word is what
+# keeps this safe -- "Earthborm/vil doral" is a map label and must survive.
+_CREDIT_SLASH = re.compile(
+    r"^\s*[a-z ]{0,20}(?:assistant|editor|artist|colorist|letterer)s?\s*/",
+    re.IGNORECASE,
+)
+
+# A role line sometimes stands alone with its value on the next line
+# ("ART BY" / "TURTLEME"). The whole line must therefore be a role *phrase*,
+# not merely contain a job word: "ART IS LOOKING" and "to even control" are
+# dialogue, and a single-word match deleted "AT HIMSELF IN" and "the bodily
+# functions" from the real corpus. Kept as whole phrases so it stays exact.
+_ROLE_LINE = re.compile(
+    r"^\s*(?:"
+    r"art\s+by|story\s+by|script\s+by|"
+    r"presented\s+by|"
+    r"(?:original\s+)?novel(?:\s+and\s+script)?|"
+    r"quality\s*control(?:\s+by)?|"
+    r"comic\s*artist|"
+    r"(?:main|storyboard|coloring|lining|render|background)?\s*"
+    r"assistants?|"
+    r"(?:assistant\s+)?editors?|"
+    r"translat(?:or|ion)(?:\s+by)?"
+    r")\s*[.:]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_job_line(text: str) -> bool:
+    """Whether ``text`` is *only* a role line, e.g. ``ART BY`` or ``presented by``."""
+
+    return bool(_ROLE_LINE.match(text.strip()))
+
+
+def _credit_role_lead(stripped: str) -> bool:
+    """Whether a line opens with a credit role *and* is shaped like a credit.
+
+    The role regex is a prefix match, so on its own it also matches prose that
+    merely begins with a role word: "Original sin was the topic", "Story by the
+    fire, he said", "Art by the river was nothing special". None of those occur
+    in the measured corpus, only because comic dialogue is mostly shouted and
+    short -- which is luck, not a guarantee.
+
+    A real credit line is a *label*, and only two shapes are labels: a colon
+    introduces the role's value ("Quality Control: Kisai Entertainment"), or the
+    role runs to the end of the line ("STORY BY") and is at least two words. A
+    one-word line is excluded outright: "ORIGINAL" is the punchline of "NOT VERY
+    / ORIGINAL." on page 50 of chapter 181, and the raw corpus contains no
+    one-word role label that needs dropping.
+    """
+
+    match = _CREDIT_ROLE.match(stripped)
+    if not match:
+        return False
+    if ":" in stripped[match.end():]:
+        return True
+    return match.end() >= len(stripped) and len(stripped.split()) >= 2
+
+
+def is_credit_line(text: str, previous: str | None = None) -> bool:
+    """Whether a line is scan-group furniture rather than story text.
+
+    Four shapes are recognised, all measured against a hand-read corpus:
+
+    * a URL or domain -- ``scan-site.test``, ``bit.ly/some-volume``
+    * a social handle -- ``@turtleme93``
+    * a credit block -- ``ComicArtist:Fuyuki23``, ``Quality Control: Kisai
+      Entertainment``; the OCR drops the space, so the role arrives glued to
+      its value and only the leading role word is reliable
+    * ``role/name`` or ``role`` followed by a name on the next line -- ``lining
+      assistant/MIKAGE``, ``ART BY`` / ``TURTLEME``
+
+    Credit *vocabulary* is deliberately not a signal. "control", "original" and
+    "comic" all occur in dialogue, so matching them would delete real text; the
+    role must be at the start of the line and be a recognisable job title.
+
+    ``previous`` is the preceding line of the same transcript, used only for the
+    last shape. Passing it is optional so a single block can still be judged.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # Two or three letters are a panel sound effect or detector noise, not a
+    # credit block: "ACK!" must survive.
+    if _URL.search(stripped) or _HANDLE.search(stripped):
+        return True
+    if _credit_role_lead(stripped):
+        return True
+    if _CREDIT_SLASH.match(stripped):
+        return True
+    if len(stripped.split()) <= _CREDIT_TAIL_WORDS and _CREDIT_TAIL.search(stripped):
+        return True
+    # A bare name is only a credit when a role line precedes it. Checked last
+    # because it is the only shape that depends on context, and guarded twice:
+    # the line must be short *and* contain no ordinary English word. Without the
+    # second guard, "it is imperative" follows "assistant editors" and is
+    # deleted -- measured in chapter 181, where it is the first line of dialogue
+    # after the credits page.
+    #
+    # An "all capitals" escape was tried for publisher names made of ordinary
+    # words ("TAPAS MEDIA") and removed: it changed nothing on the real corpus
+    # (the pages were already scrubbed, so it could never be measured), while a
+    # short shout after a role line is exactly what it would have deleted.
+    if previous and _looks_like_job_line(previous):
+        words = stripped.split()
+        if len(words) <= 3 and not any(
+            word.strip(".,:()&").lower().replace("'", "") in _DICTIONARY
+            for word in words
+        ):
+            return True
+    return False
+
+
+def keep_credit_mask(lines) -> list[bool]:
+    """Which lines survive :func:`scrub_credit_lines`, positionally.
+
+    Exposed separately because a caller holding structured blocks needs to know
+    *which* lines went, not just what the text became. Matching the surviving
+    text back to blocks by string is wrong as soon as a line repeats, and
+    credits contain repeats ("tapas" appears twice on one page).
+    """
+
+    mask: list[bool] = []
+    previous: str | None = None
+    for line in lines:
+        if is_credit_line(line, previous=previous):
+            previous = line
+            mask.append(False)
+            continue
+        mask.append(True)
+        previous = line
+    return mask
+
+
+def scrub_credit_lines(lines) -> list[str]:
+    """Drop scan-group credit lines from a chapter's lines.
+
+    Each line is judged on its own, with the previous line as the only context
+    (a name follows ``ART BY``). A *block* rule was tried first -- once a credit
+    is found, keep removing short lines until one is long -- and it was wrong:
+    the real corpus lost ``THE MIRROR!``, ``RUMBLE``, ``VIRION!`` and ``CAN'T
+    BLAME YOURSELF.`` because every one of them is two words. A credit block is
+    not reliably contiguous at the text level, so the safer rule is the local
+    one. Names split onto their own line are left behind as ``noise`` warnings,
+    which is the honest cost of not deleting story text.
+    """
+
+    return [line for line, keep in zip(lines, keep_credit_mask(lines)) if keep]

@@ -29,7 +29,12 @@ from comic_pages import (
     is_bubble_like,
     slice_scroll,
 )
-from comic_text import clean_ocr_text, is_meaningful, resegment
+from comic_text import (
+    clean_ocr_text,
+    is_meaningful,
+    keep_credit_mask,
+    resegment,
+)
 
 CHAPTER_PATTERNS = (
     re.compile(r"^c_(\d+)_(\d+)\.(?:jpg|jpeg|png|webp)$", re.IGNORECASE),
@@ -269,6 +274,21 @@ def read_chapter(
     return dedupe_seam_blocks(blocks), time.perf_counter() - started
 
 
+def _drop_credit_blocks(blocks: list[dict]) -> list[dict]:
+    """Remove scan-group credit blocks from the flat transcript's input.
+
+    Works on the same ``(page, text)`` sequence ``format_transcript`` will emit,
+    so the decision is made about lines as they will appear rather than about
+    detector boxes. ``keep_credit_mask`` holds the rule and its evidence, and
+    returns positions rather than text -- matching surviving text back to blocks
+    by string breaks as soon as a line repeats, which credits do.
+    """
+
+    texts = [str(block.get("text", "")) for block in blocks]
+    mask = keep_credit_mask(texts)
+    return [block for block, keep in zip(blocks, mask) if keep]
+
+
 def write_jsonl(path: Path, blocks: list[dict]) -> None:
     """Keep the structured transcript next to the flat text, for later passes."""
 
@@ -373,7 +393,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         title = f"{args.series} chapter {chapter}"
-        transcript = format_transcript(title, blocks)
+        # Credits are dropped from the flat transcript only. ``blocks`` stays
+        # whole so the JSONL keeps everything the detector saw: nothing is lost,
+        # and a later pass can revisit the decision without re-reading images.
+        kept = _drop_credit_blocks(blocks)
+        transcript = format_transcript(title, kept)
         if not transcript.strip() or len(transcript.split()) < 5:
             print(f"  chapter {chapter}: no text detected, skipping")
             continue
