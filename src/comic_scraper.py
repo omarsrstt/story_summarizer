@@ -131,6 +131,32 @@ DEFAULT_CHAPTER_LINK_SELECTOR = "a[href*=chapter]"
 DEFAULT_IMAGE_SELECTOR = "img.wp-manga-chapter-img"
 DEFAULT_IMAGE_ATTRIBUTE = "data-src"
 
+#: Where the site lists *every* series, paginated -- the catalogue. Not needed to
+#: download anything, so this is a separate concern from the keys above and is
+#: only read by ``comic_catalog``.
+#:
+#: ``{series_base}`` is the series URL with ``{slug}`` removed (so
+#: ``https://host/manga/{slug}/`` gives ``https://host/manga/``), which means a
+#: site laid out the Madara way needs no entry here at all. ``{page}`` is the page
+#: number. A site that puts page 1 somewhere else sets the whole URL.
+#:
+#: ``?m_orderby=title`` is not decoration -- it is what makes the walk correct.
+#: The default order is "latest update", so a series bumped while the walk runs
+#: moves to the front and every later page shifts by one card: a measured walk
+#: saw 7 duplicates in 240 cards over pages 1-20, and 14 pages that served
+#: nothing new at all. Under ``title`` the same 240 cards were 240 distinct, the
+#: sort is total, and a walk is reproducible. Measured, not assumed: `alphabet`
+#: and `new` also give a stable non-overlapping sort, `title` is simply the one
+#: checked to the last page.
+DEFAULT_SERIES_LIST_URL = "{series_base}page/{page}/?m_orderby=title"
+
+#: The anchors in the catalogue that each name one series. The anchor's ``href``
+#: is the series page and its text is the title, so one selector carries both.
+#: The page-item container is the grid card, not a sidebar link -- on the theme
+#: this was built against a catalogue page holds 12 cards but 17 ``/manga/``
+#: links, and counting the links over-reports by five every page.
+DEFAULT_SERIES_ITEM_SELECTOR = "div.page-item-detail h3 a"
+
 
 @dataclass(frozen=True)
 class Site:
@@ -155,6 +181,8 @@ class Site:
     chapter_link_selector: str = DEFAULT_CHAPTER_LINK_SELECTOR
     image_selector: str = DEFAULT_IMAGE_SELECTOR
     image_attribute: str = DEFAULT_IMAGE_ATTRIBUTE
+    series_list_url: str = DEFAULT_SERIES_LIST_URL
+    series_item_selector: str = DEFAULT_SERIES_ITEM_SELECTOR
 
     def list_url(self, series_url: str) -> str:
         """The chapter-list endpoint for ``series_url``."""
@@ -162,6 +190,24 @@ class Site:
         return self.chapter_list_url.format(
             series_url=series_url.rstrip("/") + "/",
             slug=series_url.rstrip("/").rsplit("/", 1)[-1],
+        )
+
+    def series_base(self) -> str:
+        """The series URL with the ``{slug}`` placeholder removed.
+
+        Stripping the placeholder rather than hardcoding ``/manga/`` is what lets
+        a site with a different path prefix work, and it is derived from the one
+        URL the config already had to supply.
+        """
+
+        base = self.series_url.split("{slug}", 1)[0]
+        return base if base.endswith("/") else base + "/"
+
+    def catalogue_url(self, page: int) -> str:
+        """The catalogue page listing series number ``page``."""
+
+        return self.series_list_url.format(
+            series_base=self.series_base(), page=page
         )
 
 
@@ -193,6 +239,10 @@ def _site_from_entry(entry: dict, name: str | None) -> Site:
         ),
         image_selector=entry.get("image_selector") or DEFAULT_IMAGE_SELECTOR,
         image_attribute=entry.get("image_attribute") or DEFAULT_IMAGE_ATTRIBUTE,
+        series_list_url=entry.get("series_list_url") or DEFAULT_SERIES_LIST_URL,
+        series_item_selector=(
+            entry.get("series_item_selector") or DEFAULT_SERIES_ITEM_SELECTOR
+        ),
     )
 
 
@@ -247,6 +297,26 @@ def resolve_site(config: dict | None = None, name: str | None = None) -> Site:
         )
 
     return _site_from_entry(config, None)
+
+
+def ensure_configured(site: Site) -> None:
+    """Refuse a site that is still the placeholder.
+
+    Checked by *value*, not by presence: ``resolve_site`` fills the placeholder
+    for a missing key, so an unconfigured or half-edited file is caught here
+    rather than fetching the reserved host and reporting a network failure --
+    which reads as "the site is down" instead of "you have not configured a
+    site".
+
+    Shared with the catalogue lister (``comic_catalog``) so the two stages give
+    the same refusal for the same mistake, rather than one reporting ``HTTP 0``.
+    """
+
+    if site.host == DEFAULT_SITE_HOST or DEFAULT_SITE_HOST in site.series_url:
+        raise ScrapeError(
+            "no comic site is configured: copy src/comic_site.example.json to "
+            "src/comic_site.json and fill in comic_series_url and comic_site_host"
+        )
 
 
 #: The site this process is working on, resolved once. ``None`` means "not
@@ -1486,18 +1556,8 @@ def prepare(args) -> Setup:
     """
 
     config = load_config()
-    # The site is the one thing that deliberately is not in the tracked config.
-    # This is checked by *value*, not by presence: ``resolve_site`` fills the
-    # placeholder for a missing key, so an unconfigured or half-edited file is
-    # caught here rather than fetching the reserved host and reporting a network
-    # failure -- which reads as "the site is down" instead of "you have not
-    # configured a site".
     site = resolve_site(config, getattr(args, "site", None))
-    if site.host == DEFAULT_SITE_HOST or DEFAULT_SITE_HOST in site.series_url:
-        raise ScrapeError(
-            "no comic site is configured: copy src/comic_site.example.json to "
-            "src/comic_site.json and fill in comic_series_url and comic_site_host"
-        )
+    ensure_configured(site)
     # Bound before anything fetches: ``page_urls`` and ``safe_image_url`` read
     # the active site, and a run must never answer those questions from a
     # different site's config than the one this plan was built for.

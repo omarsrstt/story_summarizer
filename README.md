@@ -196,6 +196,61 @@ prompt is story and not advertising. The rule keys on **shape**, never on credit
 the decision can be revisited without re-reading 50 images. Re-run with `--overwrite` to benefit for
 transcripts written before this existed.
 
+#### Listing what a site publishes
+
+Before you can choose a series you need the catalogue. `src/comic_catalog.py` lists every series the
+site publishes — slug, title, URL — and downloads none of them:
+
+```bash
+uv run python src/comic_catalog.py                      # whole catalogue
+uv run python src/comic_catalog.py --pages 3 --delay 0  # a trial run
+```
+
+   - `--site`: which configured site to list (default: `default_site`).
+   - `--pages N`: read at most N pages. The file is marked `"complete": false`.
+   - `--first-page N`: start later in the list. Also marked incomplete — see below.
+   - `--delay`: pause before each request (default `0.4`).
+   - `--out`: write somewhere other than `comics/_catalog/<site>.json`.
+
+It writes one JSON file per site to `comics/_catalog/<site>.json`, gitignored with the rest of
+`comics/` because every entry carries the host. The run itself prints only the site's *name* and the
+URL *path*:
+
+```
+listing series for site 'primary' from /manga/page/1/
+  page    1:  12 on page,    12 series so far
+  page    2:  12 on page,    24 series so far
+...
+11324 series across 944 page(s)
+written to comics/_catalog/primary.json
+```
+
+**The count is measured, not calculated.** Several things would each make a formula wrong, and all
+were measured on the real site rather than guessed:
+
+* A catalogue page holds **17** `/manga/` links but **12** grid cards. The other five are sidebar
+  and navigation links, so counting links over-reports by five a page. The selector targets the card.
+* The default order is **"latest update"**, which makes a walk unsound: a series bumped mid-walk jumps
+  to the front and shifts every later page by a card. Measured over pages 1–20, that was 240 cards but
+  only **233 distinct**, and a full walk stalled on 14 pages and came out 11,015 series. The default
+  URL therefore carries **`?m_orderby=title`**, a total order: the same 240 cards were **240 distinct**
+  and the walk reached the same last page with no stalls. `alphabet` and `new` also work; `title` is
+  the one verified to the last page.
+* The total grows as series are published, so the last page is found by walking until a page is
+  empty rather than by trusting a number. (That is also why `--first-page` is marked partial.)
+
+The walk still **dedups by slug** and still **retries a page that introduces nothing**, recording it
+in `"stalled_pages"` if the retry also fails. Defence in depth: a hole the walk cannot fill must be
+admitted, not averaged over.
+
+A **cap, a late start, or any stalled page is written as `"complete": false`**, because a fragment of
+a catalogue reads exactly like a whole one otherwise. Anything that is neither a 200 nor a 404 raises
+instead of ending the walk: a Cloudflare interstitial is also "a page with no series", and silently
+truncating an 11,000-series list to 20 would look like a finished run.
+
+The catalogue is a **listing only**. `comic_scraper.py` does not read it, and nothing joins the two
+trees by anything but the folder you name, so listing cannot disturb a download.
+
 #### Downloading the pages
 
 `src/comic_scraper.py` gets the images into `comics/<name>/` so the reader has something to read.
@@ -266,6 +321,12 @@ is a site running Madara:
 | `chapter_link_selector` | `a[href*=chapter]` | the anchors that name a chapter |
 | `image_selector` | `img.wp-manga-chapter-img` | the page images |
 | `image_attribute` | `data-src` | set to `src` for a site that does not lazy-load |
+| `series_list_url` | `{series_base}page/{page}/?m_orderby=title` | where the catalogue paginates (listing only) |
+| `series_item_selector` | `div.page-item-detail h3 a` | the grid card's title link (listing only) |
+
+The last two are read only by `comic_catalog.py`, below — downloading needs neither. Drop the
+`?m_orderby=title` from `series_list_url` only if the site does not understand it; on the site
+measured, removing it makes the listing miss series.
 
 Find out in two requests whether a site works as-is. `--dry-run` fetches only the chapter list, so it
 tests the URL, method and link selector together:

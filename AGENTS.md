@@ -2,7 +2,7 @@
 
 Personal novel scraper + local-LLM summarizer. Two-stage pipeline, both CLI scripts in `src/`.
 A parallel comic path (`comic_scraper.py` → `comic_reader.py` → the same `summarize.py`) is a third
-stage described below.
+stage described below, with `comic_catalog.py` beside it to list what a site publishes.
 
 ## Environment
 
@@ -137,6 +137,52 @@ Three scripts, each writing the next stage's input:
 So the join between comic and novel stages is **plain integers on disk**. Neither `comic_reader.py`
 nor `summarize.py` knows the comic scraper exists, and neither was modified for it. That is why the
 manifest pins ordinals rather than trusting site numbers.
+
+### `comic_catalog.py` is a side stage, not a pipeline step
+
+`src/comic_catalog.py` answers "what is on this site at all?" and writes only
+`comics/_catalog/<site>.json` (gitignored, because every entry holds a URL). It reads no manifest,
+touches no image, and **no stage reads its output** — so it can run while a download is in progress.
+It exists because choosing a series needs a list of series, which the downloader (one series at a
+time) cannot give.
+
+Its count is **measured, never derived from the page number**, and each reason below was measured on
+the real site rather than reasoned about:
+
+* **A page holds 17 `/manga/` links but 12 grid cards.** The extras are sidebar and navigation
+  links, so counting links over-reports by five on every page. The selector targets the card
+  (`div.page-item-detail h3 a`), and a test pins the two-counts shape.
+* **The default order is "latest update", which makes a walk unsound.** A series bumped while the
+  walk runs jumps to the front and every later page shifts by a card. Measured over pages 1–20: 240
+  cards but only **233 distinct**; a full walk stalled on 14 pages that served nothing new and came
+  out 11,015 series. `?m_orderby=title` gives a total order — the same 240 cards were **240
+  distinct**, and the walk reached the same last page (944) with no stalls. `alphabet` and `new` are
+  also stable; `title` is the one verified to the end. So `DEFAULT_SERIES_LIST_URL` carries
+  `?m_orderby=title`, and that is load-bearing, not decoration.
+* **The walk still dedups and still retries a stalled page.** Belt and braces on top of the stable
+  order: dedup by slug, and a page introducing nothing is re-fetched once, then recorded in
+  `stalled_pages` with the file written `"complete": false`. A hole the walk cannot fill must not be
+  reported as a clean run — that is the one failure that looks exactly like success.
+* **A cap or a late start must be written as `"complete": false`.** A 3-page fragment of an
+  11,000-series catalogue is byte-for-byte indistinguishable from a whole one otherwise, which is the
+  same class of error as a batch with a hole that still looks complete.
+
+Three routes were measured and only the catalogue is complete; do not "fix" the walk to use the
+others:
+
+| Route | What it actually gave |
+| --- | --- |
+| `/manga/page/N/` | complete: 12/page, ends in a clean 404 at N+1. **Use this**, with `?m_orderby=title`. |
+| `sitemap*.xml` | truncated and **not walkable**: they list *chapter* URLs (partitioned by chapter, not series), later catalogue pages held series absent from every sitemap read, and an out-of-range `/manga-sitemap<N>.xml` still answers 200, so "walk to 404" never terminates. |
+| `wp-json/wp/v2/…` | cannot see the series type: `wp/v2/types` lists core types only and `wp/v2/search` indexes blog posts only. |
+
+A Cloudflare interstitial is *also* "a page with no series", so a non-200/non-404 raises instead of
+ending the walk. Ending it quietly is the one failure that looks exactly like success — the same
+reason `comic_check` refuses to treat a challenge as EOF.
+
+The run prints the site's **name** and the URL **path**, never the host, so a pasted transcript
+carries nothing publishable; a test asserts stdout and stderr are host-free on both the success and
+the refusal path.
 
 ### Credit lines are furniture, and are matched by shape
 
@@ -318,6 +364,16 @@ Two traps, both already hit:
   history; anyone can read old commits. Publishing required a history rewrite, not just an edit.
   New site-bearing work must therefore never be committed in the first place.
 
+**Do not read `src/comic_site.json` (or `src/scraper_config.json`) without asking first.** The file
+exists so the site never reaches tracked content, and reading it into a transcript of the session
+defeats that: whatever is printed can be quoted back, pasted into an issue, or carried into a later
+commit. Ask the user, say why, and prefer a route that keeps the value out of the output — the code
+reads the file itself, so most tasks need only *that* it is configured, not *what* it holds. Two
+questions are answered without opening it: whether a host is configured
+(`comic_scraper.DEFAULT_SITE_HOST` is the sentinel), and which site names exist (keys only). Redact
+what must be shown (`<real host>` → `<configured host>`) and never echo a full image URL, which
+carries the host in its path.
+
 `src/scraper_config.json` follows the same rule for the novel scraper, with
 `src/scraper_config.example.json` tracked. Any new scraper stage should get its own example +
 gitignored real file rather than putting a host in a tracked config.
@@ -397,8 +453,9 @@ suggest models the user cannot run locally.
 prompt-set resolution, `llama-server` lifecycle, and the batching/geometry helpers behind
 `--group-size`, `--digest` and `--all`. It also covers the comic downloader: label selection and
 ordinal pinning (`test_comic_selection.py`, `test_comic_manifest.py`), fingerprinting and the
-duplicate rules (`test_comic_images.py`, `test_comic_scraper.py`), and filename/grouping
-(`test_comic_naming.py`). The transcript validator has its own suite (`test_comic_check.py`), where
+duplicate rules (`test_comic_images.py`, `test_comic_scraper.py`), filename/grouping
+(`test_comic_naming.py`), and the catalogue walk (`test_comic_catalog.py`). The transcript validator
+has its own suite (`test_comic_check.py`), where
 each detector must be provably load-bearing: disable it and a named test has to fail. That rule
 found three real defects in the validator itself — a page-gap check built on a false premise, a
 fused check that split glossary names, and a noise count that treated every contraction as
