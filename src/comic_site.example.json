@@ -44,6 +44,18 @@
     "configured host, so it would also accept evil.example.com."
   ],
 
-  "comic_series_url": "https://comic-site.test/manga/{slug}/",
-  "comic_site_host": "comic-site.test"
+  "_shape_note": [
+    "The block below is the 'sites' shape, which is what a copied file should",
+    "start from. The flat shape (comic_series_url and comic_site_host at the",
+    "top level, no 'sites') is still read and needs no edit -- but it cannot be",
+    "extended to a second site, so a new setup should use this shape."
+  ],
+
+  "sites": {
+    "primary": {
+      "comic_series_url": "https://comic-site.test/manga/{slug}/",
+      "comic_site_host": "comic-site.test"
+    }
+  },
+  "default_site": "primary"
 }
