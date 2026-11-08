@@ -243,6 +243,92 @@ def is_meaningful(text: str, known: list[str] | None = None) -> bool:
     return False
 
 
+# -- per-series glossaries --------------------------------------------------
+#
+# The glossary is the one piece of comic config that is *not* about the site: it
+# names the series' own proper nouns, so one list cannot serve two comics. The
+# tracked ``comic_config.json`` keeps a flat ``glossary`` for the series it was
+# written for, and a ``glossaries`` map keyed by series name lets a second
+# series carry its own without disturbing the first.
+#
+# The flat list stays the fallback rather than being migrated away, because a
+# single-series setup is the common case and it must keep working untouched.
+
+
+def resolve_glossary(config, series: str | None = None) -> list[str]:
+    """The glossary terms for ``series``, from a parsed comic config.
+
+    Lookup order, and why:
+
+    1. ``glossaries[series]`` -- an explicit per-series list.
+    2. ``glossaries["default"]`` -- shared terms (a publisher that prefixes every
+       title, say), used only when the series has no list of its own.
+    3. The flat ``glossary`` list -- the series ``comic_config.json`` was
+       written for.
+
+    A series with no entry therefore falls back to the flat list, which is what
+    keeps this backwards compatible. Passing ``series=None`` skips straight to
+    the flat list, so a caller that does not know the series is not silently
+    given a different series' names.
+
+    The series key is compared case-insensitively after the ``comic-`` prefix is
+    stripped, because the reader takes ``--series TBATE`` while the transcript
+    directory is ``comic-TBATE`` and the manifest field is ``TBATE``. Requiring
+    the caller to know which spelling the config used would be a trap.
+    """
+
+    if not isinstance(config, dict):
+        return []
+
+    flat = _term_list(config.get("glossary"))
+    if series is None:
+        return flat
+
+    keys = config.get("glossaries")
+    if not isinstance(keys, dict):
+        return flat
+
+    # Both spellings of the series name: "TBATE" and "comic-TBATE". Folded so a
+    # config written by hand in either case finds the entry.
+    wanted: list[str] = []
+    bare = series.strip()
+    if bare.lower().startswith("comic-"):
+        bare = bare[len("comic-"):]
+    for spelling in (series.strip(), bare, "comic-" + bare):
+        folded = spelling.casefold()
+        if folded and folded not in wanted:
+            wanted.append(folded)
+
+    for key, value in keys.items():
+        if str(key).casefold() in wanted:
+            return _term_list(value)
+    if "default" in keys:
+        return _term_list(keys["default"])
+    return flat
+
+
+def _term_list(value) -> list[str]:
+    """A glossary value as a list of non-empty strings.
+
+    A config typo turns into an empty list rather than a ``TypeError`` from
+    inside the segmenter: this is read on every transcript, and a malformed
+    entry should cost one series its names, not abort a run that could still
+    produce text.
+
+    Entries are filtered on the *original* value, not on ``str(value)``: the
+    latter turns a JSON ``null`` into the term ``"None"``, which would then be
+    protected as if it were a character's name.
+    """
+
+    if not isinstance(value, list):
+        return []
+    return [
+        str(term).strip()
+        for term in value
+        if isinstance(term, (str, int, float)) and str(term).strip()
+    ]
+
+
 def words_in(text: str) -> int:
     """Count real words, so a fused block is not counted as one."""
 

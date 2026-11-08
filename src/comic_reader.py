@@ -34,6 +34,7 @@ from comic_text import (
     is_meaningful,
     keep_credit_mask,
     resegment,
+    resolve_glossary,
 )
 
 CHAPTER_PATTERNS = (
@@ -348,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"No such directory: {image_dir}")
 
     config = load_config()
-    glossary: list[str] = list(config.get("glossary") or [])
+    glossary: list[str] = resolve_glossary(config, args.series)
     if args.glossary:
         glossary += json.loads(Path(args.glossary).read_text(encoding="utf-8"))
 

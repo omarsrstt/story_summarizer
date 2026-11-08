@@ -226,6 +226,56 @@ uv run python src/comic_scraper.py --slug the-beginning-after-the-end-series -n 
      stop. It does **not** scan, which is the point: a scan is a request per chapter and answers
      a question you did not ask.
    - `--delay`: seconds before each page request (default `0.4`).
+   - `--site`: which configured site this series is on. Only needed once `comic_site.json` lists
+     more than one — see below.
+
+**Adding a second site.** Everything below the downloader is site-agnostic: the reader, the
+validator, the summariser and the benchmark read folders, not URLs. So supporting a new site means
+one config entry, and only the downloader changes.
+
+The config accepts two shapes. The flat one is the original and needs no edit if you have one site:
+
+```json
+{ "comic_series_url": "https://site-a.test/manga/{slug}/", "comic_site_host": "site-a.test" }
+```
+
+For several, name them. `--site` picks one; `default_site` is used when it is omitted:
+
+```json
+{
+  "sites": {
+    "a": { "comic_series_url": "https://site-a.test/manga/{slug}/", "comic_site_host": "site-a.test" },
+    "b": { "comic_series_url": "https://site-b.test/comic/{slug}/", "comic_site_host": "site-b.test" }
+  },
+  "default_site": "a"
+}
+```
+
+Each series still gets its own folder, so two sites and two comics share the tree without touching
+each other: `comics/<name>/`, `novels/comic-<name>/`, `summaries/comic-<name>/`.
+
+**If the site is not the Madara theme**, add the keys it differs on. These were hardcoded until a
+second site was wanted, and the defaults reproduce Madara exactly, so a site that needs none of them
+is a site running Madara:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `chapter_list_url` | `{series_url}ajax/chapters/` | where the list lives |
+| `chapter_list_method` | `POST` | Madara answers a POST; a plain GET returns `0` |
+| `chapter_list_headers` | `{"X-Requested-With": "XMLHttpRequest"}` | sent with that request |
+| `chapter_link_selector` | `a[href*=chapter]` | the anchors that name a chapter |
+| `image_selector` | `img.wp-manga-chapter-img` | the page images |
+| `image_attribute` | `data-src` | set to `src` for a site that does not lazy-load |
+
+Find out in two requests whether a site works as-is. `--dry-run` fetches only the chapter list, so it
+tests the URL, method and link selector together:
+
+```bash
+uv run python src/comic_scraper.py -n NewComic --site b --slug its-series-slug -c 1-2 --dry-run
+```
+
+A resolved plan means those three match. Then download one chapter: a folder with real images means
+the image selector is right too, and an empty folder refuses loudly rather than reporting success.
 
 **The chapter list is one request.** A plain GET of the site's AJAX endpoint answers `0`; a POST
 carrying `X-Requested-With: XMLHttpRequest` returns all ~300 chapters at once. Earlier versions
@@ -357,10 +407,29 @@ invented (`THEYRE` stays whole rather than becoming `they re`), and a suffix is 
 stem (`AUGMENTER`, not `augment er`).
 
 Proper nouns are the limit of what a dictionary can infer: nothing in the text distinguishes
-`sap in` from `block him from`. `src/comic_config.json` therefore carries a per-series `glossary`
-of names and story terms; add to it whenever a recap mangles a name. The same file holds the tile
-geometry. It is tracked and holds nothing site-specific — the site's address lives in the
-gitignored `src/comic_site.json` instead.
+`sap in` from `block him from`. `src/comic_config.json` therefore carries glossaries of names and
+story terms; add to one whenever a recap mangles a name. The same file holds the tile geometry. It is
+tracked and holds nothing site-specific — the site's address lives in the gitignored
+`src/comic_site.json` instead.
+
+**Glossaries are per series, and one flat list cannot serve two comics.** A term is a series' own
+proper noun, so handing series B the list written for series A would do real damage: the segmenter
+would protect A's names inside B's text and the validator would accept them as known. Key them by
+series name:
+
+```json
+{
+  "glossaries": {
+    "TBATE": ["ARTHUR", "SYLPHIE"],
+    "OTHER-COMIC": ["KAI"]
+  }
+}
+```
+
+Resolution is `glossaries[series]`, then `glossaries["default"]` for terms every series shares, then
+the flat `glossary` list. A series with no entry inherits the flat list, so an existing single-series
+config keeps working untouched. The key matches case-insensitively with or without the `comic-`
+prefix, since the reader takes `--series TBATE` while the folder is `comic-TBATE`.
 
 The glossary is an aid, not a measure of quality. Most comics have no source novel, so a fix that
 only works because names were supplied is not a fix — judge a change by how it performs with an

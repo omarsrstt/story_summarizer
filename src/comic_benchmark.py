@@ -776,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no novel at {novel_dir}")
 
     pairing = load_pairing(REPO_ROOT / args.pairing if args.pairing else None)
-    glossary = load_glossary(REPO_ROOT / "src" / "comic_config.json")
+    glossary = load_glossary(REPO_ROOT / "src" / "comic_config.json", args.name)
     index = NovelIndex(novel_dir)
 
     transcripts = sorted(comic_dir.glob("chapter_*.txt"))
@@ -838,17 +838,19 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if any(r.wrong_pair for r in results) else 0
 
 
-def load_glossary(config: Path) -> list[str]:
+def load_glossary(config: Path, series: str | None = None) -> list[str]:
     """The same glossary ``comic_check`` uses, so the two agree.
 
     Reusing ``comic_check.load_glossary`` rather than reading the key here keeps
     one definition of a term; the benchmark and the validator must classify the
-    same word the same way or their counts cannot be compared.
+    same word the same way or their counts cannot be compared. ``series`` is
+    passed through for the same reason: a per-series glossary resolved
+    differently here would make the two disagree about which names are known.
     """
 
     if not config.is_file():
         return []
-    return comic_check.load_glossary(config)
+    return comic_check.load_glossary(config, series)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,14 @@ def _fixture_site(monkeypatch):
     The real site now lives in the developer's gitignored ``comic_site.json``, so
     a test that read the config would pass or fail depending on whose machine ran
     it. Tests that assert config behaviour still override this themselves.
+
+    Both caches are cleared: ``_SITE_HOST`` is the resolved host and
+    ``_ACTIVE_SITE`` is the resolved site, and either one left over from a
+    previous test would answer for the wrong config.
     """
 
     monkeypatch.setattr(cs, "_SITE_HOST", None)
+    monkeypatch.setattr(cs, "_ACTIVE_SITE", None)
     monkeypatch.setattr(
         cs,
         "load_config",

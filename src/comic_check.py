@@ -63,6 +63,7 @@ from comic_text import (
     has_cjk,
     keep_credit_mask,
     resegment,
+    resolve_glossary,
 )
 
 # ``# TBATE chapter 147`` / ``# comic-TBATE chapter 1``. The number is the
@@ -146,8 +147,17 @@ def parse_transcript(text: str) -> Transcript:
     return Transcript(chapter=chapter, pages=pages, lines=lines)
 
 
-def load_glossary(path) -> list[str]:
-    """Read the ``glossary`` list from a comic config, or ``[]`` if absent."""
+def load_glossary(path, series: str | None = None) -> list[str]:
+    """Read the glossary for ``series`` from a comic config, or ``[]``.
+
+    ``series`` selects a per-series entry from the config's ``glossaries`` map;
+    without it the flat ``glossary`` list is returned, which is what every
+    existing caller and single-series config relies on. The resolution rules
+    live in ``comic_text.resolve_glossary`` so the reader, the validator and the
+    benchmark cannot disagree about which names are protected -- they previously
+    each read the key themselves, and a term the reader protected but the
+    validator did not would be reported as noise forever.
+    """
 
     path = Path(path)
     if not path.is_file():
@@ -156,8 +166,7 @@ def load_glossary(path) -> list[str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
-    terms = data.get("glossary", []) if isinstance(data, dict) else []
-    return [str(term) for term in terms]
+    return resolve_glossary(data, series)
 
 
 def _tokens(text: str) -> list[str]:
@@ -547,7 +556,7 @@ def main(argv=None) -> int:
         print(f"no transcripts at {directory}", file=sys.stderr)
         return 2
 
-    glossary = load_glossary(args.config or "src/comic_config.json")
+    glossary = load_glossary(args.config or "src/comic_config.json", args.name)
     transcripts = sorted(directory.glob("chapter_*.txt"))
     if not transcripts:
         print(f"no chapter_*.txt in {directory}", file=sys.stderr)

@@ -50,7 +50,7 @@ import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -100,6 +100,190 @@ IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 #: Spellings of the same format, folded so one page has one name.
 _EXTENSION_ALIASES = {".jpeg": ".jpg"}
 
+# -- what a site looks like -------------------------------------------------
+#
+# Everything below was hardcoded until a second site was wanted. The defaults are
+# the Madara/MangaStream WordPress theme -- the shape this project was built
+# against, and the most common comic CMS -- so a site that needs no entries at
+# all is a site that runs that theme. Each key is therefore an *override*, and a
+# site with none of them behaves exactly as before.
+
+#: Where the chapter list lives, relative to the series URL.
+#:
+#: ``{series_url}`` carries a trailing slash, so a site whose list sits anywhere
+#: else writes the whole URL instead. The list is also where a site most often
+#: differs, so it gets the most flexible key.
+DEFAULT_CHAPTER_LIST_URL = "{series_url}ajax/chapters/"
+
+#: The list is behind an AJAX handler on Madara. A plain GET answers ``0``,
+#: which is why this is a POST and why the header matters.
+DEFAULT_CHAPTER_LIST_METHOD = "POST"
+DEFAULT_CHAPTER_LIST_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
+#: The anchors in the list response that name a chapter, in reading order.
+DEFAULT_CHAPTER_LINK_SELECTOR = "a[href*=chapter]"
+
+#: The images on a chapter page, and the attribute holding the real address.
+#:
+#: Real chapter images are lazy-loaded: ``src`` is a placeholder loader and the
+#: address to fetch is in ``data-src``. A site that does not lazy-load sets the
+#: attribute to ``src``.
+DEFAULT_IMAGE_SELECTOR = "img.wp-manga-chapter-img"
+DEFAULT_IMAGE_ATTRIBUTE = "data-src"
+
+
+@dataclass(frozen=True)
+class Site:
+    """Everything this stage needs to know about one site.
+
+    Resolved once, in ``prepare``, and carried down rather than re-read: a run
+    is about one site, and re-deriving the selectors per page would let a config
+    edit mid-run change the meaning of the pages already fetched.
+
+    ``name`` is ``None`` for a legacy flat config (the two-key
+    ``comic_site.json``), which keeps that file working unchanged.
+    """
+
+    series_url: str
+    host: str
+    name: str | None = None
+    chapter_list_url: str = DEFAULT_CHAPTER_LIST_URL
+    chapter_list_method: str = DEFAULT_CHAPTER_LIST_METHOD
+    chapter_list_headers: dict = field(
+        default_factory=lambda: dict(DEFAULT_CHAPTER_LIST_HEADERS)
+    )
+    chapter_link_selector: str = DEFAULT_CHAPTER_LINK_SELECTOR
+    image_selector: str = DEFAULT_IMAGE_SELECTOR
+    image_attribute: str = DEFAULT_IMAGE_ATTRIBUTE
+
+    def list_url(self, series_url: str) -> str:
+        """The chapter-list endpoint for ``series_url``."""
+
+        return self.chapter_list_url.format(
+            series_url=series_url.rstrip("/") + "/",
+            slug=series_url.rstrip("/").rsplit("/", 1)[-1],
+        )
+
+
+def _site_from_entry(entry: dict, name: str | None) -> Site:
+    """Build a ``Site`` from one config entry, filling every default.
+
+    Unknown keys are ignored rather than refused: a config may carry comments or
+    keys for a later stage, and a run should not die because of one it does not
+    read.
+    """
+
+    series_url = entry.get("comic_series_url") or DEFAULT_SERIES_URL
+    host = entry.get("comic_site_host") or DEFAULT_SITE_HOST
+    headers = entry.get("chapter_list_headers")
+    return Site(
+        series_url=series_url,
+        host=host,
+        name=name,
+        chapter_list_url=entry.get("chapter_list_url") or DEFAULT_CHAPTER_LIST_URL,
+        chapter_list_method=(
+            entry.get("chapter_list_method") or DEFAULT_CHAPTER_LIST_METHOD
+        ).upper(),
+        chapter_list_headers=(
+            dict(headers) if isinstance(headers, dict)
+            else dict(DEFAULT_CHAPTER_LIST_HEADERS)
+        ),
+        chapter_link_selector=(
+            entry.get("chapter_link_selector") or DEFAULT_CHAPTER_LINK_SELECTOR
+        ),
+        image_selector=entry.get("image_selector") or DEFAULT_IMAGE_SELECTOR,
+        image_attribute=entry.get("image_attribute") or DEFAULT_IMAGE_ATTRIBUTE,
+    )
+
+
+def resolve_site(config: dict | None = None, name: str | None = None) -> Site:
+    """The site ``name`` selects, or the only/legacy one when unset.
+
+    Two config shapes are supported, and the flat one is why an existing
+    ``comic_site.json`` needs no edit:
+
+    * ``{"sites": {"alpha": {...}, "beta": {...}}, "default_site": "alpha"}`` --
+      named sites, selected with ``--site``.
+    * ``{"comic_series_url": ..., "comic_site_host": ...}`` -- the original
+      single-site file. Still read when ``sites`` is absent.
+
+    An ambiguous request is refused by name rather than guessed: picking one of
+    several sites silently would download the wrong comic into the folder the
+    user named, and the pages would look plausible.
+    """
+
+    if config is None:
+        config = load_config()
+
+    sites = config.get("sites")
+    if isinstance(sites, dict) and sites:
+        chosen = name or config.get("default_site")
+        if chosen is None:
+            if len(sites) == 1:
+                chosen = next(iter(sites))
+            else:
+                raise ScrapeError(
+                    "several sites are configured ("
+                    + ", ".join(sorted(sites))
+                    + "): pass --site NAME, or set default_site in the config"
+                )
+        entry = sites.get(chosen)
+        if entry is None:
+            raise ScrapeError(
+                f"no site named {chosen!r}; configured: "
+                + ", ".join(sorted(sites))
+            )
+        if not isinstance(entry, dict):
+            raise ScrapeError(f"site {chosen!r} is not a JSON object")
+        return _site_from_entry(entry, chosen)
+
+    if name is not None:
+        # A named site against a flat config is a mistake, not a fallback: the
+        # run would fetch from the flat site while the user believes they chose
+        # another one, and the pages would look plausible.
+        raise ScrapeError(
+            f"no site named {name!r}: the config has no 'sites' map, so add one "
+            "(see src/comic_site.example.json) or drop --site"
+        )
+
+    return _site_from_entry(config, None)
+
+
+#: The site this process is working on, resolved once. ``None`` means "not
+#: resolved yet". A run touches one site, so re-reading the config per page would
+#: be waste -- and, worse, a mid-run edit could change the meaning of pages
+#: already fetched. Tests reset it with ``monkeypatch.setattr(cs, "_ACTIVE_SITE",
+#: None)``.
+_ACTIVE_SITE: Site | None = None
+
+
+def site_settings() -> Site:
+    """The active site, resolved from the config on first use.
+
+    Falls back to a site built from an empty config rather than raising: this is
+    read from ``safe_image_url``, which answers a yes/no question about a URL and
+    must never raise. An unconfigured run then refuses every image (the
+    placeholder host matches nothing) instead of fetching from a guess.
+    """
+
+    global _ACTIVE_SITE
+    if _ACTIVE_SITE is None:
+        try:
+            _ACTIVE_SITE = resolve_site()
+        except ScrapeError:
+            # Ambiguous multi-site config: refuse at fetch time rather than
+            # pick one. ``prepare`` reports this properly, by name.
+            _ACTIVE_SITE = _site_from_entry({}, None)
+    return _ACTIVE_SITE
+
+
+def use_site(site: Site) -> None:
+    """Make ``site`` the one this process fetches from."""
+
+    global _ACTIVE_SITE, _SITE_HOST
+    _ACTIVE_SITE = site
+    _SITE_HOST = site.host.lower()
+
 #: How many page hashes a fingerprint needs before it can call anything a
 #: duplicate. One 64-hex hash carries far less evidence than three, and a
 #: chapter is only a duplicate candidate when at least two pages agree; see
@@ -125,11 +309,12 @@ def load_config(path=None):
 def site_host() -> str:
     """The one host page images may come from, resolved once per process.
 
-    Reads ``comic_site_host`` from the config and caches it. A missing,
-    unreadable or malformed config falls back to ``DEFAULT_SITE_HOST`` rather
-    than raising: this answers a yes/no question about a URL, and a config typo
-    turning into a ``JSONDecodeError`` from inside ``page_urls`` would surface as
-    a traceback in a caller that only expects page URLs back.
+    Answered from the active site, so ``--site`` narrows the host check to that
+    site. A missing, unreadable or ambiguous config falls back to
+    ``DEFAULT_SITE_HOST`` rather than raising: this answers a yes/no question
+    about a URL, and a config typo turning into a ``JSONDecodeError`` from inside
+    ``page_urls`` would surface as a traceback in a caller that only expects page
+    URLs back.
 
     The fallback is a placeholder host, so it matches nothing real -- an
     unconfigured run refuses every image instead of fetching from anywhere. That
@@ -142,8 +327,8 @@ def site_host() -> str:
     global _SITE_HOST
     if _SITE_HOST is None:
         try:
-            host = load_config().get("comic_site_host")
-        except (OSError, ValueError):
+            host = site_settings().host
+        except (OSError, ValueError, ScrapeError):
             # ValueError covers json.JSONDecodeError: a malformed file, not a
             # site that moved, and not a reason to stop answering.
             host = None
@@ -203,16 +388,26 @@ def chapter_url(series_url: str, slug: str) -> str:
     return series_url.rstrip("/") + "/" + slug.strip("/") + "/"
 
 
-def fetch_chapter_list(series_url: str) -> list[tuple[str, str]]:
+def fetch_chapter_list(
+    series_url: str, site: Site | None = None
+) -> list[tuple[str, str]]:
     """Every chapter of the series as ``(slug, label)``, newest first.
 
-    One AJAX POST returns the whole list (~300 chapters), so no walking is
-    needed. A non-200 or a Cloudflare interstitial raises: an empty or partial
-    list would otherwise read as a complete one.
+    One request returns the whole list (~300 chapters) on the theme this was
+    built against, so no walking is needed. A non-200 or a Cloudflare
+    interstitial raises: an empty or partial list would otherwise read as a
+    complete one.
+
+    The endpoint, method, headers and link selector all come from ``site``, so a
+    site whose list lives elsewhere or is a plain GET needs config rather than a
+    code change. The defaults reproduce the Madara behaviour exactly.
     """
 
-    url = series_url.rstrip("/") + "/ajax/chapters/"
-    status, body = post_transport(url, {"X-Requested-With": "XMLHttpRequest"}, {})
+    site = site or site_settings()
+    url = site.list_url(series_url)
+    headers = dict(site.chapter_list_headers)
+    fetch = post_transport if site.chapter_list_method == "POST" else default_transport
+    status, body = fetch(url, headers, {})
     if looks_like_challenge(body):
         raise ScrapeError(
             f"chapter list: Cloudflare challenge instead of the list at {url}. "
@@ -227,7 +422,7 @@ def fetch_chapter_list(series_url: str) -> list[tuple[str, str]]:
 
     soup = BeautifulSoup(body, "html.parser")
     chapters: list[tuple[str, str]] = []
-    for anchor in soup.select("a[href*=chapter]"):
+    for anchor in soup.select(site.chapter_link_selector):
         href = anchor.get("href") or ""
         slug = href.rstrip("/").rsplit("/", 1)[-1]
         if slug:
@@ -561,20 +756,25 @@ def select_plan(manifest: Manifest, text: str | None) -> list[ChapterRecord]:
 # -- the pages --------------------------------------------------------------
 
 
-def page_urls(html: str) -> list[str]:
+def page_urls(html: str, site: Site | None = None) -> list[str]:
     """The reader images on a chapter page, in page order.
 
     Real chapter images are lazy-loaded: ``src`` is a placeholder loader and the
-    address to fetch is in ``data-src``. Only ``data-src`` is read -- the
-    placeholder lives on the site itself, so it would pass
-    ``safe_image_url`` and be downloaded as if it were a page. Off-site URLs are
-    dropped here as well as at fetch time, so nothing downstream ever holds one.
+    address to fetch is in ``data-src``. Only the configured attribute is read --
+    the placeholder lives on the site itself, so it would pass ``safe_image_url``
+    and be downloaded as if it were a page. Off-site URLs are dropped here as
+    well as at fetch time, so nothing downstream ever holds one.
+
+    Both the selector and the attribute come from ``site``. A site that does not
+    lazy-load sets ``image_attribute`` to ``src``; the lazy-load default is what
+    stops a loading spinner being saved as page 1.
     """
 
+    site = site or site_settings()
     soup = BeautifulSoup(html, "html.parser")
     urls: list[str] = []
-    for img in soup.select("img.wp-manga-chapter-img"):
-        url = (img.get("data-src") or "").strip()
+    for img in soup.select(site.image_selector):
+        url = (img.get(site.image_attribute) or "").strip()
         if url and safe_image_url(url):
             urls.append(url)
     return urls
@@ -1162,18 +1362,19 @@ class Setup:
     plan: list[ChapterRecord]
 
 
-def series_url_for(slug: str, config: dict | None = None) -> str:
-    """The series URL for ``slug``, from ``comic_series_url`` in the config.
+def series_url_for(slug: str, config: dict | None = None, site: str | None = None) -> str:
+    """The series URL for ``slug``, from the selected site's template.
 
     The template lives in the gitignored ``comic_site.json``; ``prepare`` refuses
     to start without it, so the placeholder default is only ever reached by a
-    direct call that is not about to touch the network.
+    direct call that is not about to touch the network. ``site`` selects a named
+    entry from the config's ``sites`` map; without it the legacy flat config is
+    used, which is why an existing single-site file needs no edit.
     """
 
     if config is None:
         config = load_config()
-    template = config.get("comic_series_url") or DEFAULT_SERIES_URL
-    return template.format(slug=slug.strip("/"))
+    return resolve_site(config, site).series_url.format(slug=slug.strip("/"))
 
 
 def _ordinal_selection(manifest: Manifest, text: str) -> list[ChapterRecord]:
@@ -1286,15 +1487,22 @@ def prepare(args) -> Setup:
 
     config = load_config()
     # The site is the one thing that deliberately is not in the tracked config.
-    # Without this check a fresh clone would fetch the placeholder host and
-    # report a network failure, which reads as "the site is down" rather than
-    # "you have not configured a site".
-    if not config.get("comic_series_url"):
+    # This is checked by *value*, not by presence: ``resolve_site`` fills the
+    # placeholder for a missing key, so an unconfigured or half-edited file is
+    # caught here rather than fetching the reserved host and reporting a network
+    # failure -- which reads as "the site is down" instead of "you have not
+    # configured a site".
+    site = resolve_site(config, getattr(args, "site", None))
+    if site.host == DEFAULT_SITE_HOST or DEFAULT_SITE_HOST in site.series_url:
         raise ScrapeError(
             "no comic site is configured: copy src/comic_site.example.json to "
             "src/comic_site.json and fill in comic_series_url and comic_site_host"
         )
-    series_url = series_url_for(args.slug, config)
+    # Bound before anything fetches: ``page_urls`` and ``safe_image_url`` read
+    # the active site, and a run must never answer those questions from a
+    # different site's config than the one this plan was built for.
+    use_site(site)
+    series_url = site.series_url.format(slug=args.slug.strip("/"))
     out_dir = REPO_ROOT / config.get("comics_dir", "comics") / args.name
     manifest_path = out_dir / "chapters.json"
 
@@ -1305,7 +1513,7 @@ def prepare(args) -> Setup:
     manifest.series = args.name
     manifest.site = series_url
 
-    listing = fetch_chapter_list(series_url)
+    listing = fetch_chapter_list(series_url, site)
     if not listing:
         raise ScrapeError(f"the chapter list at {series_url} is empty")
     manifest = assign(manifest, listing)
@@ -1368,6 +1576,10 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument(
         "--slug", default=None,
         help="Series slug from the site URL (default: the value of --name)")
+    parser.add_argument(
+        "--site", default=None, metavar="NAME",
+        help="Which configured site this series is on, when comic_site.json "
+             "holds a 'sites' map (default: its 'default_site')")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
         "-c", "--chapters", default=None, metavar="LABELS",

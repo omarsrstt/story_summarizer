@@ -266,9 +266,33 @@ standing rule, not a one-off cleanup, and it has already been violated once:
 
 | File | Tracked | Holds |
 | --- | --- | --- |
-| `src/comic_config.json` | **yes** | glossary, tile geometry, `comics_dir`, `transcripts_dir` — no site |
-| `src/comic_site.json` | no (gitignored) | `comic_series_url`, `comic_site_host` |
-| `src/comic_site.example.json` | **yes** | the same two keys as placeholders |
+| `src/comic_config.json` | **yes** | glossaries, tile geometry, `comics_dir`, `transcripts_dir` — no site |
+| `src/comic_site.json` | no (gitignored) | `sites` map, or the legacy flat site keys |
+| `src/comic_site.example.json` | **yes** | the same shapes as placeholders |
+
+**Several sites coexist; `--site` picks one.** `comic_site.json` accepts either the original flat
+pair (`comic_series_url`, `comic_site_host`) or a `sites` map of named entries plus `default_site`.
+The flat shape is not deprecated and needs no edit: it resolves to an unnamed site, which is what
+every existing install has. `comic_scraper.resolve_site` refuses an ambiguous config by naming the
+configured sites rather than picking one, because guessing would download the wrong comic into the
+folder the user named and the pages would look plausible.
+
+**The site's *shape* is config too.** Chapter-list URL/method/headers, the chapter-link selector, and
+the image selector/attribute were hardcoded to the Madara WordPress theme. They are now per-site
+overrides whose defaults reproduce that theme exactly (`DEFAULT_CHAPTER_LIST_URL` etc. in
+`comic_scraper.py`). This is what makes a second site a config entry rather than a code change — and
+a site that needs no overrides is a site running Madara. `Site.list_url` was checked against the
+string the old code built by hand: a missing trailing slash asks a different URL and 404s.
+
+**Glossaries are per series.** A flat `glossary` list cannot serve two comics: the entries are
+another series' proper nouns, so the validator would accept the wrong names as known and the
+segmenter would protect them. `comic_text.resolve_glossary` resolves
+`glossaries[series]` → `glossaries["default"]` → the flat `glossary`, so a series with no entry
+inherits the flat list and existing single-series configs keep working. It is one function shared by
+`comic_reader`, `comic_check` and `comic_benchmark` **because** they must agree: a term the reader
+protects but the validator does not is reported as noise forever. The series key matches with or
+without the `comic-` prefix and case-insensitively, since the reader takes `TBATE` while the folder
+is `comic-TBATE`.
 
 **Where transcripts go is declared once.** `comic_reader` writes
 `<NOVEL_DIR>/<slug>/chapter_NNNNN.txt` using `NOVEL_DIR` from
@@ -280,10 +304,10 @@ wins, for deliberately separating comic output.
 
 `comic_reader.load_config` reads the tracked file and shallow-merges `comic_site.json` over it, so
 an older single-file config that still carries the site keys keeps working. A *missing* site file is
-fine (a reader-only run needs no host); the downloader refuses to start without `comic_series_url`
-and says which file to copy. `comic_scraper.DEFAULT_SERIES_URL`/`DEFAULT_SITE_HOST` are placeholders
-on the reserved `.test` suffix: they match nothing, so an unconfigured run refuses every image
-rather than fetching from a guess.
+fine (a reader-only run needs no host); the downloader refuses to start when the resolved site is
+still the placeholder and says which file to copy. `comic_scraper.DEFAULT_SERIES_URL`/
+`DEFAULT_SITE_HOST` are placeholders on the reserved `.test` suffix: they match nothing, so an
+unconfigured run refuses every image rather than fetching from a guess.
 
 Two traps, both already hit:
 
